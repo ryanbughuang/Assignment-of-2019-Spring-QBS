@@ -1,0 +1,343 @@
+---
+title: "Assign2"
+author: "Ryan Huang"
+date: "3/14/2019"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(rethinking)
+library(rstan)
+```
+## Question 1
+Re-center the weight data
+```{r}
+data("Howell1")
+q1 <- Howell1 %>% mutate(weight.c = (weight - mean(weight)))
+
+dat <- list(N = NROW(q1),
+            height = q1$height,
+            weight_c = q1$weight.c)
+
+```
+
+Fit the data to the model in class:
+```{r}
+q1_model = "
+data {
+  int<lower=1> N;
+  vector[N] height;
+  vector[N] weight_c;
+}
+parameters {
+  real alpha;
+  real beta;
+  real sigma;
+}
+model {
+  //Likelyhood
+  vector[N] mu = alpha + beta * weight_c;
+  
+  //prior
+  height ~ normal(mu, sigma);
+  alpha ~ normal(178,20);
+  beta ~ normal(0,10);
+  sigma ~ uniform(0,50);
+}
+"
+fit_q1 <- stan(model_code = q1_model, data = dat, cores = 4, chains = 2, iter = 1000)
+```
+The sampling results
+```{r}
+print(fit_q1, probs = c(0.10, 0.5, 0.9))
+q1_post = as.data.frame(fit_q1)
+p1 <- 
+  ggplot() + 
+  lims(y = c(130, 180)) + 
+  geom_point(data = q1,
+             aes(weight.c, height), 
+             shape = 1, color = 'dodgerblue') +
+  geom_abline(intercept = mean(q1_post$alpha), slope = mean(q1_post$beta))
+```
+
+The prediction result:
+```{r}
+interval_est = function(alpha,beta, x, bound){
+  mu_at_x = alpha + beta * x
+  if (bound == 'lower'){
+    return(HPDI(mu_at_x)[1])
+  } else if (bound == 'upper'){
+    return(HPDI(mu_at_x)[2])
+  } else {
+    return(mean(mu_at_x))
+  }
+}
+
+answer.sheet = 
+  tibble(
+    Individual = rep(1:5),
+    Weight = c(46.95, 43.72, 64.78, 32.59, 54.63),
+    )
+answer.sheet = answer.sheet %>%
+  mutate(
+    expected_height = sapply(answer.sheet$Weight-mean(answer.sheet$Weight),
+                      FUN=interval_est,
+                      alpha=q1_post$alpha,
+                      beta = q1_post$beta,
+                      bound = ''),
+    lower_89 = sapply(answer.sheet$Weight-mean(answer.sheet$Weight),
+                      FUN=interval_est,
+                      alpha=q1_post$alpha,
+                      beta = q1_post$beta,
+                      bound = 'lower'),
+    upper_89 = sapply(answer.sheet$Weight-mean(answer.sheet$Weight),
+                      FUN=interval_est,
+                      alpha=q1_post$alpha,
+                      beta = q1_post$beta, 
+                      bound = 'upper')
+  )
+```
+The final output
+```{r}
+answer.sheet
+```
+
+
+##Question 2
+
+Filter the data of age under 18
+```{r}
+data('Howell1', package = 'rethinking')
+q2_data = Howell1 %>% 
+  filter( age < 18 )
+q2_data = q2_data %>% mutate(weight.c = .$weight - mean(.$weight))
+plot(q2_data$weight.c, q2_data$height)
+```
+
+Initialize Stan model
+```{r}
+q2_model = "
+data {
+  int N;
+  vector[N] height;
+  vector[N] weight_c;
+}
+
+parameters{
+  real alpha;
+  real beta;
+  real sigma;
+}
+model{
+//Likelyhood
+  vector[N] mu = alpha + beta * weight_c;
+  
+  //prior
+  height ~ normal(mu, sigma);
+  alpha ~ normal(100,20);
+  beta ~ normal(0,10);
+  sigma ~ uniform(0,50);
+
+}
+
+"
+```
+Fit the data to the model
+```{r}
+dat = list(
+        N = nrow(q2_data),
+        height = q2_data$height,
+        weight_c = q2_data$weight.c
+)
+fit_q2 <- stan(model_code = q2_model, data = dat, cores = 4, chains = 2, iter = 1000)
+
+```
+#MCMC result summary
+The summary report tells us that the mean height of children under 18 is alpha = 108.34.
+For every 10 units increase in weights, the model predicts the average height to increase by 27.2 units given other things are equal.
+```{r}
+print(fit_q2)
+```
+
+
+
+(b)Then we plot the raw data, the predicted regression line and 89% HPDI for the mean, and the 89% HPDI for predicted heights.
+```{r}
+q2_post = as.data.frame(fit_q2)    # the posterior from fit_q2 
+f_mu <- function(x) q2_post$alpha + q2_post$beta * (x - mean(q2_data$weight)) 
+# calculate mu for all combination of alpha, beta from post.
+
+weight_new <- seq(0, 45)
+mu <- # compute the 0.89 interval of regression line (predicted mu)
+  sapply(weight_new, f_mu) %>%
+  as_tibble() %>%
+  rename_all(function(x) weight_new) %>%
+  mutate(Iter = row_number()) %>%
+  gather(weight, height, -Iter) %>%
+  group_by(weight) %>%
+  mutate(hpdi_l = HDInterval::hdi(height, credMass = 0.89)[1],
+         hpdi_h = HDInterval::hdi(height, credMass = 0.89)[2]) %>%
+  mutate(mu = mean(height)) %>%
+  ungroup() %>%
+  mutate(weight = as.integer(weight))
+
+
+p2 <- ggplot() + xlim(0,50) +
+  # plot the raw data
+  geom_point(data = q2_data,
+             aes(weight, height), shape = 1, color = 'dodgerblue') +
+  # plot the CI
+  geom_ribbon(data = mu,
+              aes(x = weight, ymin = hpdi_l, ymax = hpdi_h),
+              alpha = .5) +
+  # plot the regression line
+  # In the model x = weight.c, when plotting against weight, the intercept should be alpha - beta * mean(x)
+  geom_abline(data = q2_post,
+              aes(intercept = mean(alpha)- mean(q2_post$beta) * mean(q2_data$weight),
+                  slope = mean(beta))) +
+  labs(subtitle="HPDI Interval = 0.89")
+
+
+#Add the Prediction interval
+sim_ht <- 
+  sapply(weight_new,
+         function(x)
+           rnorm(NROW(q2_post),
+                 q2_post$alpha + q2_post$beta * (x - mean(q2_data$weight)),
+                 q2_post$sigma)) %>%
+  as_tibble() %>%
+  rename_all(function(x) weight_new) %>%
+  mutate(Iter = row_number()) %>%
+  gather(weight, height, -Iter) %>%
+  group_by(weight) %>%
+  mutate(pi_l = rethinking::PI(height, prob = 0.89)[1],
+         pi_h = rethinking::PI(height, prob = 0.89)[2]) %>%
+  ungroup() %>%
+  mutate(weight = as.integer(weight))
+
+p2 + geom_ribbon(data = sim_ht,
+                 mapping = aes(x=weight, ymin=pi_l, ymax=pi_h), alpha = .3) +
+  labs(subtitle = 'Prediction Intervals = 0.89')
+```
+(c) From the plot in (b), we can notice that weight and height doesn't seem to have a linear relationship. When weights are small or large, the model tends to under estimate the height. However, when weights are around 15~30, the model usually over estimate the height. It seems that the prediction could improve if we take log on either the weights or the heights.
+
+##Question 3
+
+#(a)
+Recode the stan model
+```{r}
+q3_model = "
+data {
+  int N;
+  vector[N] height;
+  vector[N] weight_log;
+}
+parameters{
+  real alpha;
+  real beta;
+  real sigma;
+}
+model{
+//Likelyhood
+  vector[N] mu = alpha + beta * weight_log;
+  
+  //prior
+  height ~ normal(mu, sigma);
+  alpha ~ normal(178,100);
+  beta ~ normal(0,100);
+  sigma ~ uniform(0,50);
+
+}
+"
+```
+
+Transform weight to log weight and 
+```{r}
+dat = list(
+      N = nrow(Howell1),
+      height = Howell1$height,
+      weight_log = log(Howell1$weigh)
+)
+```
+Fit the data to the model
+```{r}
+fit_q3 <- stan(model_code = q3_model, data = dat, cores = 4, chains = 2, iter = 1000)
+
+print(fit_q3)
+q3_post = as.data.frame(fit_q3)
+(expected_mu_y = mean(q3_post$alpha) + mean(q3_post$beta) * log(mean(Howell1$weight)))
+
+```
+The alpha = -23.63 doesn't tell us much since we didn't centered the X.
+After input the mean of the weight, the model predicts the mean height to be 144.39 units.
+The summary report tells us that when weight increase by 1%, the height is expected to increase by beta/100 = 0.47 units.
+
+#(b)
+The raw data
+```{r}
+plot(height~weight, data=Howell1, col=col.alpha(rangi2, 0.4))
+```
+The regression result
+```{r}
+f_log_mu = function(x) mean(q3_post$alpha) + log(x) * mean(q3_post$beta)
+
+mu = tibble(expected_mu = sapply(Howell1$weight, f_log_mu),
+               weight = Howell1$weight)
+p3 = ggplot() +
+  # raw data
+  geom_point(data = Howell1, aes(x=weight, y=height), alpha = 0.4, color = 'dodgerblue') +
+  # regression line
+  geom_line(data = mu, aes(x=weight, y=expected_mu)) + 
+  labs(x = 'Weight', y = 'Height')
+```
+Add CI of mean
+```{r}
+# calculate mu for all combination of alpha, beta from post.
+f_log_mu_matrix <- function(x) q3_post$alpha + q3_post$beta * log(x)
+
+weight_new <- seq(5, 60)
+mu_matrix <- # compute the 0.89 interval of regression line (predicted mu)
+  sapply(weight_new, f_log_mu_matrix) %>%
+  as_tibble() %>%
+  rename_all(function(x) weight_new) %>%
+  mutate(Iter = row_number()) %>%
+  gather(weight, height, -Iter) %>%
+  group_by(weight) %>%
+  mutate(hpdi_l = HPDI(height)[1],
+         hpdi_h = HPDI(height)[2]) %>%
+  mutate(mu = mean(height)) %>%
+  ungroup() %>%
+  mutate(weight = as.integer(weight))
+
+# Add to CI to p3
+p3 = p3 +
+  geom_ribbon(data = mu_matrix,
+              aes(x = weight, ymin = hpdi_l, ymax = hpdi_h),
+              alpha = .5)
+```
+Add PI
+```{r}
+#Add the Prediction interval
+sim_ht <- 
+  sapply(weight_new,
+         function(x)
+           rnorm(NROW(q3_post),
+                 q3_post$alpha + q3_post$beta * log(x),
+                 q3_post$sigma)) %>%
+  as_tibble() %>%
+  rename_all(function(x) weight_new) %>%
+  mutate(Iter = row_number()) %>%
+  gather(weight, height, -Iter) %>%
+  group_by(weight) %>%
+  mutate(pi_l = rethinking::PI(height, prob = 0.89)[1],
+         pi_h = rethinking::PI(height, prob = 0.89)[2]) %>%
+  ungroup() %>%
+  mutate(weight = as.integer(weight))
+
+p3 = p3 + geom_ribbon(data = sim_ht,
+                 mapping = aes(x=weight, ymin=pi_l, ymax=pi_h), alpha = .3)
+p3
+```
+
+

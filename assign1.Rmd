@@ -1,0 +1,262 @@
+---
+title: "Assign1"
+author: "Ryan Huang"
+date: "2/28/2019"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidybayes)
+library(tidyverse)
+library(rethinking)
+```
+
+## Question 1
+Using grid approximation, compute the posterior distribution for the probability of a birth being a boy. Assume a uniform prior probability. Which parameter value maximizes the posterior probability?
+
+```{r}
+# Initiate the grid approximation
+birth1 <- c(1,0,0,0,1,1,0,1,0,1,0,0,1,1,0,1,1,0,0,0,1,0,0,0,1,
+            0,0,0,0,1,1,1,0,1,0,1,1,1,0,1,0,1,1,0,1,0,0,1,1,0,
+            1,0,0,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,1,0,0,1,1,1,1,
+            0,1,0,1,1,1,1,1,0,0,1,0,1,1,0,1,0,1,1,1,0,1,1,1,1)
+
+birth2 <- c(0,1,0,1,0,1,1,1,0,0,1,1,1,1,1,0,0,1,1,1,0,0,1,1,1,
+            0,1,1,1,0,1,1,1,0,1,0,0,1,1,1,1,0,0,1,0,1,1,1,1,1,
+            1,1,1,1,1,1,1,1,1,1,1,0,1,1,0,1,1,0,1,1,1,0,0,0,0,
+            0,0,1,0,0,0,1,1,0,0,1,0,0,1,1,0,0,0,1,1,1,0,0,0,0)
+
+q1 <- # create a data frame with 100 points
+  tibble(p_grid            = seq(from = 0, to = 1, length.out = 100),  # define grid
+         prior             = 1) %>%                                   # define prior
+  mutate(likelihood      = dbinom(sum(birth1)+sum(birth2), size = length(birth1) + length(birth2), prob = p_grid)) %>%  # compute likelihood at each value in grid
+  mutate(unstd_posterior = likelihood * prior) %>%                  # compute product of likelihood and prior
+  mutate(posterior       = unstd_posterior / sum(unstd_posterior))
+
+```
+Plot the posterior of the approximation
+```{r}
+q1 %>%
+  ggplot(aes(x=p_grid, y=posterior)) +
+  geom_point() +
+  geom_line() +
+  labs(subtitle = "Grid Approximation - 100 points",
+       x = "probability of boys",
+       y = "posterior probability") +
+  theme(panel.grid = element_blank())
+```
+The parameter value maximizing the posterior probability is:
+```{r}
+(max_parameter = q1$p_grid[ which.max(q1$posterior) ])
+```
+
+## Question 2
+Using the sample() function, draw 10,000 random parameter values from the posterior distribution calculated above. Use these samples to estimate the 50%, 89%, and 97% highest posterior density intervals.
+```{r}
+# sample from the posterior
+samples = tibble(samples = sample(q1$p_grid, # randomly select from p_grid
+                                   prob = q1$posterior, # probility of each p_grid
+                                   size = 1e4, # select 10,000 sample
+                                   replace = T)) %>% # sample with replacement 
+          mutate(sample_number = 1:n())
+```
+The 50% HDI
+```{r}
+mode_hdi(samples$samples, .width=0.5)
+```
+```{r}
+q1 %>% 
+  ggplot(aes(x = p_grid)) +
+  geom_ribbon(data = q1 %>% filter(p_grid > median_qi(samples$samples, .width = .5)[, "ymin"] & 
+                                    p_grid < median_qi(samples$samples, .width = .5)[, "ymax"]),
+              aes(ymin = 0, ymax = posterior),
+              fill = "grey75") +
+  geom_line(aes(y = posterior)) +
+  labs(subtitle = "50% Percentile Interval",
+       x = "proportion of birth of boys (p)",
+       y = "density")
+
+```
+
+The 89% HDI
+```{r}
+mode_hdi(samples$samples, .width=0.89)
+```
+```{r}
+q1 %>% 
+  ggplot(aes(x = p_grid)) +
+  geom_ribbon(data = q1 %>% filter(p_grid > median_qi(samples$samples, .width = .89)[, "ymin"] & 
+                                    p_grid < median_qi(samples$samples, .width = .89)[, "ymax"]),
+              aes(ymin = 0, ymax = posterior),
+              fill = "grey75") +
+  geom_line(aes(y = posterior)) +
+  labs(subtitle = "89% Percentile Interval",
+       x = "proportion of birth of boys (p)",
+       y = "density")
+
+```
+The 97% HDI
+```{r}
+mode_hdi(samples$samples, .width=0.97)
+```
+```{r}
+q1 %>% 
+  ggplot(aes(x = p_grid)) +
+  geom_ribbon(data = q1 %>% filter(p_grid > median_qi(samples$samples, .width = .97)[, "ymin"] & 
+                                    p_grid < median_qi(samples$samples, .width = .97)[, "ymax"]),
+              aes(ymin = 0, ymax = posterior),
+              fill = "grey75") +
+  geom_line(aes(y = posterior)) +
+  labs(subtitle = "97% Percentile Interval",
+       x = "proportion of birth of boys (p)",
+       y = "density")
+```
+
+## Question 3
+Use rbinom function to simulate 10,000 replicates of 200 births. You should end up with 10,000 numbers, each one a count of boys out of 200 births. Compare the distribution of predicted numbers of boys to the actual count in the data (111 boys out of 200 births).
+```{r}
+n <- 100
+n_boys <- 111
+n_births  <- 200
+# Initiated posterior of 111 male births / 200 total births
+q3 <-
+  tibble(p_grid     = seq(from = 0, to = 1, length.out = n),
+         prior      = 1) %>% 
+  mutate(likelihood = dbinom(n_boys, size = n_births, prob = p_grid)) %>% 
+  mutate(posterior  = likelihood * prior) %>% 
+  mutate(posterior  = posterior / sum(posterior))
+
+set.seed(33.22)
+samples <-
+  tibble(samples = sample(q3$p_grid, prob = q3$posterior, size = 1e4, replace = T)) %>% 
+  mutate(w   = rbinom(1e4, size = n_births,  prob = samples),
+         key = str_c("p = ", round(samples, digits = 1)))
+```
+From the following plots, we notice that the peak of the simulated data is around the actual birth number of boys at 111 births.
+```{r}
+'p=c(0.4, 0.5, 0.6, 0.7)'
+samples  %>% 
+  filter(key != "p = 1") %>%
+  ggplot(aes(x = w)) +
+  geom_histogram(binwidth = 1, center = 0,
+                 color = "grey92", size = 1/10) +
+  geom_vline(xintercept = 111, color = "blue", linetype = 3) + # add vertical line
+  scale_x_continuous("dummy boys births",
+                     breaks = seq(from = 0, to = 200, by = 40)) +
+  scale_y_continuous(NULL, breaks = NULL) +
+  coord_cartesian(xlim = 0:200) +
+  theme(panel.grid = element_blank()) +
+  facet_wrap(~ key, ncol = 4, scales = "free_y") # wrap 4 hist together
+```
+```{r}
+'cumulative result'
+samples  %>% 
+  ggplot(aes(x = w)) +
+  geom_histogram(binwidth = 1, center = 0,
+                 color = "grey92", size = 1/2) +
+  scale_x_continuous("dummy boys births",
+                     breaks = seq(from = 60, to = 160, by = 20)) +
+  scale_y_continuous(NULL, breaks = NULL) +
+  geom_vline(xintercept = 111, color = "blue", linetype = 3) + # add vertical line
+  coord_cartesian(xlim = 50:160) +
+  theme(panel.grid = element_blank())
+print(str_c('mean = ', round(mean(samples$samples), digits = 2)))
+print(str_c('median = ', round(median(samples$samples), digits = 2)))
+```
+
+## Question 4
+Compare 10,000 counts of boys from 100 simulated first borns only to the number of boys in the first births, birth1.
+
+First we create some dummy samples.
+```{r}
+n <- 100
+n_boys <- sum(birth1)
+n_births  <- 100
+
+q4 <-
+  tibble(p_grid     = seq(from = 0, to = 1, length.out = n),
+         prior      = 1) %>% 
+  mutate(likelihood = dbinom(n_boys, size = n_births, prob = p_grid)) %>% 
+  mutate(posterior  = likelihood * prior) %>% 
+  mutate(posterior  = posterior / sum(posterior))
+
+set.seed(33.22)
+samples <-
+  tibble(samples = sample(q4$p_grid, prob = q4$posterior, size = 1e4, replace = T)) %>% 
+  mutate(w   = rbinom(1e4, size = n_births,  prob = samples),
+         key = str_c("p = ", round(samples, digits = 1)))
+```
+From the following 2 plots, we can see that our simulated data is around the actual birth number, 51 boys.
+```{r}
+#p=c(0.3, 0.4, 0.5, 0.6, 0.7)
+samples  %>% 
+  filter(key != "p = 1") %>%
+  ggplot(aes(x = w)) +
+  geom_histogram(binwidth = 1, center = 0,
+                 color = "grey92", size = 1/10) +
+  geom_vline(xintercept = n_boys, color = "blue", linetype = 3) + # add vertical line
+  scale_x_continuous("dummy boys births",
+                     breaks = seq(from = 0, to = 100, by = 20)) +
+  scale_y_continuous(NULL, breaks = NULL) +
+  coord_cartesian(xlim = 0:100) +
+  theme(panel.grid = element_blank()) +
+  facet_wrap(~ key, ncol = 5, scales = "free_y") # wrap 4 hist together
+
+```
+```{r}
+samples  %>% 
+  ggplot(aes(x = w)) +
+  geom_histogram(binwidth = 1, center = 0,
+                 color = "grey92", size = 1/2) +
+  scale_x_continuous("dummy boys births",
+                     breaks = seq(from = 20, to = 80, by = 20)) +
+  scale_y_continuous(NULL, breaks = NULL) +
+  geom_vline(xintercept = n_boys, color = "blue", linetype = 3) + # add vertical line
+  coord_cartesian(xlim = 20:80) +
+  theme(panel.grid = element_blank())
+print(str_c('mean = ', round(mean(samples$samples), digits = 2)))
+print(str_c('median = ', round(median(samples$samples), digits = 2)))
+```
+## Question 5
+The model assumes that sex of first and second births are independent. To check this assumption, focus now on second births that followed female first borns. Compare 10,000 simulated counts of boys to only those second births that followed girls.
+
+# compare p(boys) v.s p(second boys | first girls) v.s p(second boys)
+```{r}
+# p(boys)
+q5_boys = tibble(p_grid = seq(from=0, to=1, length.out = 100),
+                 prior = 1) %>%
+  mutate(likelyhood = dbinom(111, size = 200, p = p_grid)) %>%
+  mutate(unstd_posterior = prior * likelyhood) %>%
+  mutate(std_posterior = unstd_posterior/sum(unstd_posterior))
+
+q5_boys_samples <-
+  tibble(samples = sample(q5_boys$p_grid, prob = q5_boys$std_posterior, size = 1e4, replace = T)) %>% 
+  mutate(w   = rbinom(1e4, size = 49,  prob = samples),
+         key = str_c("p = ", round(samples, digits = 1)))
+dens(q5_boys_samples$w, adj = 0.8)
+```
+
+```{r}
+#p(second boys)
+q5_second_boys = tibble(p_grid = seq(from=0, to=1, length.out = 100),
+                        prior = 1) %>%
+  mutate(likelyhood = dbinom(sum(birth2), size = 100, p = p_grid)) %>%
+  mutate(unstd_posterior = prior * likelyhood) %>%
+  mutate(std_posterior = unstd_posterior/sum(unstd_posterior))
+
+q5_second_boys_samples <-
+  tibble(samples = sample(q5_second_boys$p_grid, prob = q5_second_boys$std_posterior, size = 1e4, replace = T)) %>% 
+  mutate(w   = rbinom(1e4, size = 49,  prob = samples),
+         key = str_c("p = ", round(samples, digits = 1)))
+dens(q5_second_boys_samples$w, adj = 0.8)
+```
+
+Possibility of having more than 39 boys in 49 births under the assumption.
+``` {r}
+sum(q5_boys_samples$w >= 39) / length(q5_boys_samples$w)
+sum(q5_second_boys_samples$w >= 39) / length(q5_second_boys_samples$w)
+```
+
+From the above possibility, we notice that it's very unlikely that the gender of second birth child is independent from the first one.
+
