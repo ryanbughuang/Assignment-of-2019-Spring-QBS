@@ -153,7 +153,7 @@ dat = list(
 fit_q2 <- stan(model_code = q2_model, data = dat, cores = 4, chains = 2, iter = 1000)
 
 ```
-#MCMC result summary
+# MCMC result summary
 The summary report tells us that the mean height of children under 18 is alpha = 108.34.
 For every 10 units increase in weights, the model predicts the average height to increase by 27.2 units given other things are equal.
 ```{r}
@@ -239,7 +239,7 @@ parameters{
   real sigma;
 }
 model{
-//Likelyhood
+  //Likelyhood
   vector[N] mu = alpha + beta * weight_log;
   
   //prior

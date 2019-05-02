@@ -12,6 +12,7 @@ library(tidyverse)
 library(rethinking)
 library(purrr)
 library(rlist)
+library(gridExtra)
 ```
 ### Assignment 3
 # Data preprocessing
@@ -256,7 +257,7 @@ m2.1.1_plot = ggplot() +
   geom_ribbon(data = m2.1.1_prediction,
               aes(x = area, ymin = lower_95, ymax = upper_95),
               alpha = .5)
-m2.1.1_plot
+
 ```
 # 2-3 Counterfactual plot for group size
 ```{r}
@@ -291,7 +292,7 @@ m2.1.2_plot = ggplot() +
   geom_ribbon(data = m2.1.2_prediction,
               aes(x = groupsize, ymin = lower_95, ymax = upper_95),
               alpha = .5)
-m2.1.2_plot
+grid.arrange(m2.1.2_plot, m2.1.1_plot, nrow=1)
 ```
 # 2-4 What does this model say about the importance of each variable? Why do you get different results than you got in the questions just above?
 
@@ -412,8 +413,7 @@ m3.1.1_plot = ggplot() +
 ```
 Comparing the following 2 plots, the slope of the 2 models are both significant.
 ```{r}
-m3.1.1_plot
-m2.1.1_plot
+grid.arrange(m3.1.1_plot, m2.1.1_plot, nrow=1)
 ```
 Then, compare models with avgfood and area using RMSE.
 ```{r}
@@ -436,6 +436,7 @@ for(i in c(1:116)){
                                      bound='') %>% unlist() %>% as.vector())}
 m2.1.1_RMSE = mean((b - data_assign3$weight) ** 2) ** 0.5
 cat('RMSE of model with area =', m2.1.1_RMSE)
+cat('\n')
 cat('RMSE of model with avgfood =',m3.1.1_RMSE)
 ```
 From comparing the RMSEs, avgfood seems to be a better predictor in this case.
