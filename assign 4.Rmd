@@ -1,0 +1,584 @@
+---
+title: "Assign4"
+author: "Ryan Huang"
+date: "4/30/2019"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rethinking)
+library(tidyverse)
+library(rstan)
+library(loo)
+library(gridExtra)
+options(mc.cores = 4)
+
+```
+## Question_1
+```{r}
+data('rugged', package = 'rethinking')
+d <- rugged; rm(rugged)
+d <-
+  d %>%
+  mutate(loggdp = log(rgdppc_2000))
+d <-
+  d %>% 
+  filter(complete.cases(rgdppc_2000))
+```
+
+Question_1(a): Using rstan to fit just the interaction model
+```{r results = "hide" }
+m1.1 = "
+data{
+  int N;
+  vector[N] loggdp;
+  vector[N] rugged;
+  vector[N] cont_africa;
+}
+parameters{
+  real alpha;
+  real bA;
+  real bR;
+  real bAR;
+  real sigma;
+}
+model{
+  // model
+  vector[N] mu;
+  for (i in 1:N){
+      mu[i] = alpha + bA * cont_africa[i] + bR * rugged[i] + bAR * cont_africa[i] * rugged[i];
+  }
+  //prior
+  alpha   ~ normal(8,100);
+  bR  ~ normal(0,1);
+  bA  ~ normal(0,1);
+  bAR ~ normal(0,1);
+
+  //likelihood
+  loggdp ~ normal(mu,sigma);
+}
+generated quantities {
+  vector[N] log_lik;
+  {
+    vector[N] mu;
+    for(n in 1:N) {
+    mu[n] = alpha + bA * cont_africa[n] + bR * rugged[n] + bAR * cont_africa[n] * rugged[n]; 
+    log_lik[n] = normal_lpdf(loggdp[n] | mu[n], sigma);
+    } 
+  }
+}
+"
+# Not for now
+"
+generated quantities {
+  vector[N] log_lik;
+  {
+    vector[N] mu;
+    for(n in 1:N) {
+    mu[n] = alpha + bA * cont_africa[n] + bR * rugged[n] + bAR * cont_africa[n] * rugged[n]; 
+    log_lik[n] = normal_lpdf(loggdp[n] | mu[n], sigma);
+    } 
+  }
+}"
+
+dat1.1 <- list(
+  N = NROW(d),
+  loggdp = d$loggdp,
+  rugged = d$rugged, 
+  cont_africa = d$cont_africa
+)
+fit1.1 = stan(model_code = m1.1, data = dat1.1, cores = 4, chains = 4, iter = 3000)
+```
+```{r}
+print(fit1.1, probs = c(0.1, 0.5, 0.9), pars = c('alpha', 'bA', 'bR', 'bAR
+', 'sigma'))
+log_lik_1.1 <- extract_log_lik(fit1.1, merge_chains = FALSE)
+
+```
+Fit model w/o Seychelles
+```{r results = "hide" }
+d1.2 = d %>% filter(country != "Seychelles")
+dat1.2 <- list(
+  N = NROW(d1.2),
+  loggdp = d1.2$loggdp,
+  rugged = d1.2$rugged, 
+  cont_africa = d1.2$cont_africa
+)
+fit1.2 = stan(model_code = m1.1, data = dat1.2, cores = 4, chains = 4, iter = 3000)
+```
+```{r}
+print(fit1.2, probs = c(0.1, 0.5, 0.9), pars = c('alpha', 'bA', 'bR', 'bAR
+', 'sigma'))
+log_lik_1.2 <- extract_log_lik(fit1.2, merge_chains = FALSE)
+```
+```{r}
+coeftab(fit1.1, fit1.2)
+```
+
+Comparing the 2 models, we can tell that the coefficients of the interaction term is decreased from 0.35 to 0.25 in the model w/o Seychelles.
+
+Question_1(b): Plot the predictions of the interaction model, with and without Seychelles.
+```{r}
+# Plot w/ Seychelles.
+post1.1 <- as.data.frame(fit1.1)
+f_mu_1.1 <- function(rugged, cont_africa) with(post1.1,
+alpha + bR * rugged + bAR * rugged * cont_africa + bA * cont_africa )
+
+mu_1.1 <- mapply(f_mu_1.1, rugged = d$rugged, cont_africa = d$cont_africa)
+mu_1.1_mean <- apply(mu_1.1, 2, mean)
+mu_1.1_pi <- apply(mu_1.1, 2, rethinking::PI, prob = .97)
+d_1.1 <- d %>%
+  mutate(mu_mean = mu_1.1_mean, 
+         mu_pi_l = mu_1.1_pi[1,], 
+         mu_pi_h = mu_1.1_pi[2,],
+         inAfrica = ifelse(cont_africa, 'African nations', 'Non-African
+nations'))
+
+fig1 = d_1.1 %>%
+  ggplot(aes(x = rugged)) +
+  geom_point(aes(rugged, loggdp, color = cont_africa), shape = 16) +
+  theme(legend.position = '') +
+  geom_line(aes(rugged, mu_mean)) +
+  geom_ribbon(aes(x=rugged,ymin=mu_pi_l, ymax=mu_pi_h,fill = cont_africa),
+              alpha = .1) +
+  facet_wrap(~inAfrica) +  
+  labs(x = 'Terrain Ruggedness Index', y = 'log GDP year 2000') +
+  ggtitle("W/ Seychelles") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Plot w/o Seychelles.
+post1.2 <- as.data.frame(fit1.2)
+f_mu_1.2 <- function(rugged, cont_africa) with(post1.2, alpha + bR * rugged + bAR * rugged * cont_africa + bA * cont_africa )
+
+mu_1.2 <- mapply(f_mu_1.2, rugged = d$rugged, cont_africa = d$cont_africa)
+mu_1.2_mean <- apply(mu_1.2, 2, mean)
+mu_1.2_pi <- apply(mu_1.2, 2, rethinking::PI, prob = .97)
+d_1.2 <- d %>%
+  mutate(mu_mean = mu_1.2_mean, 
+         mu_pi_l = mu_1.2_pi[1,], 
+         mu_pi_h = mu_1.2_pi[2,],
+         inAfrica = ifelse(cont_africa, 'African nations', 'Non-African
+nations'))
+
+fig2 = d_1.2 %>%
+  ggplot(aes(x = rugged)) +
+  geom_point(aes(rugged, loggdp, color = cont_africa), shape = 16) +
+  theme(legend.position = '') +
+  geom_line(aes(rugged, mu_mean)) +
+  geom_ribbon(aes(x=rugged,ymin=mu_pi_l, ymax=mu_pi_h,fill = cont_africa),
+              alpha = .1) +
+  facet_wrap(~inAfrica) +  
+  labs(x = 'Terrain Ruggedness Index', y = 'log GDP year 2000') +
+  ggtitle("W/O Seychelles") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(fig1, fig2, nrow=2)
+```
+
+
+
+Question_1(c): Conduct a model comparison analysis, using WAIC. Fit three models to the data without Seychelles. Then make model-averaged predictions of the 3 models.
+
+Model_1: only consider rugged
+```{r}
+m3.1 = "
+data{
+  int N;
+  vector[N] loggdp;
+  vector[N] rugged;
+}
+parameters{
+  real alpha;
+  real bR;
+real<lower=0, upper=10> sigma;
+}
+model{
+  // model
+  vector[N] mu;
+  for (i in 1:N){
+      mu[i] = alpha + bR * rugged[i];
+  }
+  // prior
+  alpha ~ normal(8, 0.5);
+  bR ~ normal(0, 0.25);
+  
+  // likelihood
+  loggdp ~ normal(mu, sigma);
+}
+generated quantities{
+  vector[N] log_lik;
+  {
+    vector[N] mu;
+    for(i in 1:N){
+      mu[i] = alpha + bR * rugged[i];
+      log_lik[i] = normal_lpdf(loggdp[i] | mu[i], sigma); 
+    }
+  }
+}
+"
+```
+Model 2: Consider both rugged and cont_africa w/o interaction
+```{r}
+m3.2 = "
+data{
+  int N;
+  vector[N] loggdp;
+  vector[N] rugged;
+  vector[N] cont_africa;
+}
+parameters{
+  real alpha;
+  real bR;
+  real bA;
+  real<lower=0, upper=5> sigma;
+}
+model{
+  //model
+  vector[N] mu;
+  for (i in 1:N){
+      mu[i] = alpha + bA * cont_africa[i] + bR * rugged[i];
+  }
+  //prior
+  alpha ~ normal(8, 0.5);
+  bR ~ normal(0, 0.5);
+  bA ~ normal(0, 0.5);
+  
+  //likelihood
+  loggdp ~ normal(mu, sigma);
+}
+generated quantities{
+  vector[N] log_lik;
+{
+  vector[N] mu;
+  for(i in 1:N){
+    mu[i] = alpha + bR * rugged[i] + bA * cont_africa[i];
+    log_lik[i] = normal_lpdf(loggdp[i] | mu[i], sigma);
+    }
+  }
+}
+"
+```
+Model 3: Consider R, A and the interaction.
+```{r}
+m3.3 = m1.1
+```
+Create data sets for 3 models
+```{r results = "hide"}
+dat3.1 = list(
+  N = NROW(d1.2),
+  loggdp = d1.2$loggdp,
+  rugged = d1.2$rugged
+)
+
+dat3.2 = list(
+  N = NROW(d1.2),
+  loggdp = d1.2$loggdp,
+  rugged = d1.2$rugged, 
+  cont_africa = d1.2$cont_africa
+)
+
+dat3.3 = dat3.2
+```
+Fit model 3.1
+```{r}
+fit3.1 = stan(model_code = m3.1, data = dat3.1, cores = 4, chains = 4, iter = 3000)
+```
+Fit model 3.2
+```{r output="hide"}
+fit3.2 = stan(model_code = m3.2, data = dat3.2, cores = 4, chains = 4, iter = 3000)
+```
+Fit model 3.3
+```{r results = "hide"}
+fit3.3 = stan(model_code = m3.3, data = dat3.3, cores = 4, chains = 4, iter = 3000)
+```
+Model Comparison
+```{r}
+# extract log likelihood from the fitted model and use WAIC.
+log_lik_3.1 = extract_log_lik(fit3.1, merge_chains = FALSE)
+log_lik_3.2 = extract_log_lik(fit3.2, merge_chains = FALSE)
+log_lik_3.3 = extract_log_lik(fit3.3, merge_chains = FALSE)
+waic_3.1 = waic(log_lik_3.1)
+waic_3.2 = waic(log_lik_3.2)
+waic_3.3 = waic(log_lik_3.3)
+mod_comp <- loo::compare(waic_3.1, waic_3.2, waic_3.3)
+mod_comp
+```
+From the above comparison report, we can tell that model 3.3 with interaction term is still the best model regarding waic.
+
+Plot the model-averaged predictions of the above 3 models.
+```{r}
+# get posterior of parameters
+post3.1 <- as.data.frame(fit3.1) %>% select(alpha, bR)
+post3.2 <- as.data.frame(fit3.2) %>% select(alpha, bR, bA)
+post3.3 <- as.data.frame(fit3.3) %>% select(alpha, bR, bA, bAR)
+
+# posterior predictors for model 3.1
+f_mu_3.1 = function(rugged) with(post3.1, alpha + bR * rugged)
+mu_3.1 = d1.2$rugged %>% purrr::map(f_mu_3.1)
+mu_3.1_mean = mu_3.1 %>% purrr::map(mean) %>% purrr::flatten_dbl()
+mu_3.1_pi = mu_3.1 %>% purrr::map(rethinking::PI, prob = .97) %>% unlist()
+
+# posterior predictors for model 3.2
+f_mu_3.2 = function(rugged, cont_africa) with(post3.2, alpha + bR * rugged + bA * cont_africa)
+mu_3.2 = purrr::map2(d1.2$rugged,d1.2$cont_africa,f_mu_3.2)
+mu_3.2_mean = mu_3.2 %>% purrr::map(mean) %>% purrr::flatten_dbl()
+mu_3.2_pi = mu_3.2 %>% purrr::map(rethinking::PI, prob = .97) %>% unlist()
+
+# posterior predictors for model 3.3
+f_mu_3.3 = function(rugged,cont_africa) with(post3.3, alpha + bR * rugged + bAR * rugged * cont_africa + bA * cont_africa)
+mu_3.3 = purrr::map2(d1.2$rugged, d1.2$cont_africa, f_mu_3.3)
+mu_3.3_mean = mu_3.3 %>% purrr::map(mean) %>% purrr::flatten_dbl()
+mu_3.3_pi = mu_3.3 %>% purrr::map(rethinking::PI, prob = .97) %>% unlist()
+
+library(loo)
+r_eff        <- relative_eff(exp(log_lik_3.1))
+loo_3.1      <- loo(log_lik_3.1, r_eff = r_eff, cores = 2)
+r_eff        <- relative_eff(exp(log_lik_3.2))
+loo_3.2      <- loo(log_lik_3.2, r_eff = r_eff, cores = 2)
+r_eff        <- relative_eff(exp(log_lik_3.3))
+loo_3.3      <- loo(log_lik_3.3, r_eff = r_eff, cores = 2)
+
+weights <- loo_model_weights(list(loo_3.1, loo_3.2, loo_3.3), method = "pseudobma", BB = F)
+
+ensemble_mean <- weights[1] * mu_3.1_mean + weights[2] * mu_3.2_mean + weights[3] * mu_3.3_mean
+ensemble_PI <- weights[1] * mu_3.1_pi + weights[2] * mu_3.2_pi + weights[3] * mu_3.3_pi
+
+# Prepare data for plotting
+
+d1.2 <- 
+  d1.2 %>%
+  mutate(ens_mean = ensemble_mean,
+         ens_PI_l = ensemble_PI[seq(from=1, to=2*nrow(d1.2), by = 2)],
+         ens_PI_h = ensemble_PI[seq(from=2, to=2*nrow(d1.2), by = 2)],
+         inAfrica = ifelse(cont_africa, 'African nations', 'Non-African
+nations'))
+
+# Plotting the result
+d1.2 %>%
+  ggplot(aes(x = rugged)) +
+  geom_point(aes(rugged, loggdp, color = cont_africa), shape = 16,) +
+  theme(legend.position = '') +
+  geom_line(aes(rugged, ens_mean)) +
+  geom_ribbon(aes(x=rugged,ymin=ens_PI_l, ymax=ens_PI_h, fill = cont_africa),
+              alpha = .1) +
+  facet_grid(~inAfrica) +
+  labs(x = 'Terrain Ruggedness Index', y = 'log GDP year 2000')
+
+```
+
+## Question_2
+```{r}
+data('nettle', package = 'rethinking')
+d2 <- nettle; rm(nettle)
+d2$lang.per.cap <- d2$num.lang / d2$k.pop
+d2$log_lpc <- log(d2$lang.per.cap)
+d2$log_area <- log(d2$area)
+d2$log_area_c <- d2$log_area - mean(d2$log_area)
+d2$mgs_c <- d2$mean.growing.season - mean(d2$mean.growing.season)
+d2$sgs_c <- d2$sd.growing.season - mean(d2$sd.growing.season)
+
+```
+Question_2(a): Is log(lang.per_cap) positively associated with mean.growing.season? Consider log(area) as a covariate.
+```{r output="hide"}
+m2.1 = "
+data{  
+  int N;
+  vector[N] log_lpc;
+  vector[N] log_area;
+  vector[N] mgs_c;
+}
+parameters{
+  real alpha;
+  real bA; //beta of area
+  real bM; // beta of mean
+  real<lower=0, upper=5> sigma;
+}
+model{
+  // model
+  vector[N] mu;
+  for(i in 1:N){
+    mu[i] = alpha + bA * log_area[i] + bM * mgs_c[i];
+  }
+
+  // Prior
+  alpha ~ normal(-5, 1);
+  bA ~ normal(0, 0.5);
+  bM ~ normal(0, 0.25);
+
+  // likelihood
+  log_lpc ~ normal(mu, sigma);
+}
+"
+dat2.1 = list(
+  N = NROW(d2),
+  log_lpc = d2$log_lpc,
+  log_area = d2$log_area_c,
+  mgs_c = d2$mgs_c
+)
+fit2.1 = stan(model_code = m2.1, data = dat2.1, cores = 4, chains = 4, iter = 3000)
+```
+
+```{r}
+print(fit2.1)
+```
+Q2(b)
+```{r output="hide"}
+m2.2 = "
+data{  
+  int N;
+  vector[N] log_lpc;
+  vector[N] log_area;
+  vector[N] sgs_c;
+}
+parameters{
+  real alpha;
+  real bA; //beta of area
+  real bS; // beta of mean
+  real<lower=0, upper=5> sigma;
+}
+model{
+  // model
+  vector[N] mu;
+  for(i in 1:N){
+    mu[i] = alpha + bA * log_area[i] + bS * sgs_c[i];
+  }
+
+  // Prior
+  alpha ~ normal(-5, 1);
+  bA ~ normal(0, 0.5);
+  bS ~ normal(0, 0.25);
+
+  // likelihood
+  log_lpc ~ normal(mu, sigma);
+}
+"
+dat2.2 = list(
+  N = NROW(d2),
+  log_lpc = d2$log_lpc,
+  log_area = d2$log_area_c,
+  sgs_c = d2$sgs_c
+)
+fit2.2 = stan(model_code = m2.2, data = dat2.2, cores = 4, chains = 4, iter = 3000)
+```
+```{r}
+print(fit2.2)
+```
+Q2(c)
+```{r output="hide"}
+m2.3 = "
+data{  
+  int N;
+  vector[N] log_lpc;
+  vector[N] log_area;
+  vector[N] sgs_c;
+  vector[N] mgs_c;
+}
+parameters{
+  real alpha;
+  real bA; //beta of area
+  real bS; // beta of std
+  real bM; // beta of mean
+  real bSM; // beta of interaction
+  real<lower=0, upper=5> sigma;
+}
+
+model{
+  // model
+  vector[N] mu;
+  for(i in 1:N){
+    mu[i] = alpha + bA * log_area[i] + bS * sgs_c[i] + bM * mgs_c[i] + bSM * mgs_c[i] * sgs_c[i];
+  }
+
+  // Prior
+  alpha ~ normal(-5, 1);
+  bA ~ normal(0, 0.5);
+  bS ~ normal(0, 0.25);
+  bSM ~ normal(0, 0.5);
+
+  // likelihood
+  log_lpc ~ normal(mu, sigma);
+}
+"
+dat2.3 = list(
+  N = nrow(d2),
+  log_lpc = d2$log_lpc,
+  log_area = d2$log_area_c,
+  sgs_c = d2$sgs_c,
+  mgs_c = d2$mgs_c
+)
+
+fit2.3 = stan(model_code = m2.3, data = dat2.3, cores = 4, chains = 4, iter = 3000)
+```
+```{r}
+print(fit2.3)
+```
+
+Plotting the prediction
+```{r}
+# Break the continous Xs
+d2$mgsc.group <- cut(
+  d2$mgs_c, 
+  breaks = quantile(d2$mgs_c, probs = c(0, 1/3, 2/3, 1)),
+  include.lowest = TRUE, 
+  dig.lab = 2
+)
+
+d2$sgsc.group <- cut(
+  d2$sgs_c, 
+  breaks = quantile(d2$sgs_c, probs = c(0, 1/3, 2/3, 1)),
+  include.lowest = TRUE, 
+  dig.lab = 2
+)
+
+d2 = d2 %>% 
+  group_by(mgsc.group) %>% 
+  mutate(mgsc_gp_mean = mean(mgs_c)) %>% ungroup()
+d2 = d2 %>% 
+  group_by(sgsc.group) %>% 
+  mutate(sgsc_gp_mean = mean(sgs_c)) %>% ungroup()
+
+post2.3 = as.data.frame(fit2.3)
+f_mu_2.3 = function(log_area,sgs_c,mgs_c) with(post2.3, alpha + bA * log_area + bS * sgs_c + bM * mgs_c + bSM * mgs_c * sgs_c)
+
+# Grouped mgs_c
+mu_2.3_A = purrr::pmap(list(d2$log_area_c, d2$sgs_c, d2$mgsc_gp_mean), f_mu_2.3)
+mu_2.3_mean_A = mu_2.3_A %>% purrr::map(mean) %>% unlist()
+mu_2.3_pi_A = mu_2.3_A %>% purrr::map(rethinking::PI, prob = .97) %>% unlist()
+
+# Grouped sgs_c
+mu_2.3_B = purrr::pmap(list(d2$log_area_c, d2$sgsc_gp_mean, d2$mgs_c), f_mu_2.3)
+mu_2.3_mean_B = mu_2.3_B %>% purrr::map(mean) %>% unlist()
+mu_2.3_pi_B = mu_2.3_B %>% purrr::map(rethinking::PI, prob = .97) %>% unlist()
+
+
+figA = d2 %>% 
+  mutate(
+    mean = mu_2.3_mean_A,
+    pi_l = mu_2.3_pi_A[seq(from=1, to=2*nrow(d2), by=2)],
+    pi_h = mu_2.3_pi_A[seq(from=2, to=2*nrow(d2), by=2)]) %>%
+  ggplot(aes(x = sgs_c)) +
+  geom_point(aes(sgs_c, log_lpc), shape = 16,) +
+  theme(legend.position = '') +
+  geom_line(aes(sgs_c, mean)) +
+  geom_ribbon(aes(x=sgs_c,ymin=pi_l, ymax=pi_h),
+              alpha = .1)+
+  facet_grid(~mgsc_gp_mean)
+
+figB = d2 %>% 
+  mutate(
+    mean = mu_2.3_mean_B,
+    pi_l = mu_2.3_pi_B[seq(from=1, to=2*nrow(d2), by=2)],
+    pi_h = mu_2.3_pi_B[seq(from=2, to=2*nrow(d2), by=2)]) %>%
+  ggplot(aes(x = mgs_c)) +
+  geom_point(aes(mgs_c, log_lpc), shape = 16,) +
+  theme(legend.position = '') +
+  geom_line(aes(mgs_c, mean)) +
+  geom_ribbon(aes(x=mgs_c,ymin=pi_l, ymax=pi_h),
+              alpha = .1)+
+  facet_grid(~sgsc_gp_mean)
+
+grid.arrange(figA, figB, nrow=2)
+
+```
+
