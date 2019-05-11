@@ -1,0 +1,266 @@
+---
+title: "Assign5"
+author: "Ryan Huang"
+date: "5/8/2019"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rstan)
+library(tidyverse)
+library(MASS)
+library(gridExtra)
+library(loo)
+library(rethinking)
+```
+
+# Question 1
+
+```{r}
+# Load data and convert categorical variables to dummy variables
+data(eagles)
+d = eagles; rm(eagles)
+d$P_dummy = ifelse(d$P == "L", 1, 0)
+d$A_dummy = ifelse(d$A == "A", 1, 0)
+d$V_dummy = ifelse(d$V == "L", 1, 0)
+```
+
+```{r}
+m1.1 = "
+data{
+	int N;
+	int Y[N];
+	int n[N];
+	vector[N] P;
+	vector[N] V;
+	vector[N] A;
+}
+parameters{
+	real alpha;
+	real bP;
+	real bV;
+	real bA;
+}
+model{
+  vector[N] p;
+	alpha ~ normal(0, 10);
+	bP ~ normal(0, 5);
+	bV ~ normal(0, 5);
+	bA ~ normal(0, 5);
+
+	for (i in 1:N){
+		p[i] = inv_logit(alpha + bP * P[i] + bV * V[i] + bA * A[i]);
+	}
+	Y ~ binomial(n,p);
+}
+generated quantities{
+	vector[N] log_lik;
+	{
+		vector[N] p;
+		for (i in 1:N){
+			p[i] = inv_logit(alpha + bP * P[i] + bV * V[i] + bA * A[i]);
+			log_lik[i] = binomial_logit_lpmf(Y[i] | n[i], p[i]);
+		}
+	}
+}"
+
+dat1.1 = list(
+  N = nrow(d),
+  Y = d$y,
+  n = d$n,
+  P = d$P_dummy,
+  V = d$V_dummy,
+  A = d$A_dummy
+)
+```
+
+```{r output="hide"}
+fit1.1 = stan(model_code = m1.1, data = dat1.1, cores = 4)
+```
+```{r}
+print(fit1.1)
+```
+# Question b
+```{r}
+# Plot the posterior predictions
+inv_logit = function(x){
+  exp(x)/(1+exp(x))
+}
+
+post_1.1  = as.data.frame(fit1.1)
+pred_1.1 = function(P, V, A){
+  a = with(post_1.1, alpha + bP * P + bV * V + bA * A)
+  p = inv_logit(a)
+  return(p)
+}
+
+mean1.1 = pmap(list(d$P_dummy, d$V_dummy, d$A_dummy), pred_1.1) %>%
+  purrr::map(mean) %>% 
+  unlist()
+pi1.1 = pmap(list(d$P_dummy, d$V_dummy, d$A_dummy), pred_1.1) %>%
+  purrr::map(PI) %>% 
+  unlist()
+
+test_result1.1_p = 
+  tibble(
+   actual_p = d$y / d$n,
+   test_p_PI_l = pi1.1[seq(from = 1, to = length(pi1.1), by = 2)],
+   test_p_mean = mean1.1,
+   test_p_PI_h = pi1.1[seq(from = 2, to = length(pi1.1), by = 2)],
+   index = 1:8
+         ) %>% 
+  ggplot() +
+  geom_point(aes(x=index, y=actual_p), color = 'dodgerblue') + 
+  geom_ribbon(aes(x = index,
+                  ymin = test_p_PI_l,
+                  ymax = test_p_PI_h),
+              alpha = .1) +
+  geom_jitter(aes(x=index, y=test_p_mean), alpha=0.5, width = 0.02, height = 0) + 
+  lims(y = c(0, 1)) +
+  scale_x_continuous(labels = c("1" = "P:L/A:L/V:L", "2" = "P:L/A:L/V:S", "3" = "P:L/A:I/V:L", "4" = "P:L/A:I/V:S", "5" = "P:S/A:A/V:L", "6" = "P:S/A:A/V:S", "7" = "P:S/A:I/V:L", "8" = "P:S/A:I/V:I"), breaks = c(1:8)) +
+  labs(x = "pirate body size / adult pirate / victim body size ", y = "Proportion of success") +
+  theme(axis.text.x = element_text(angle = 45))
+
+
+test_result1.1_y = 
+  tibble(
+   actual_y = d$y,
+   test_y_PI_l = pi1.1[seq(from = 1, to = length(pi1.1), by = 2)] * d$n,
+   test_y_mean = mean1.1 * d$n,
+   test_y_PI_h = pi1.1[seq(from = 2, to = length(pi1.1), by = 2)] * d$n,
+   index = 1:8
+  ) %>% 
+ggplot() +
+  geom_point(aes(x=index, y=actual_y), color = 'dodgerblue') + 
+  geom_ribbon(aes(x = index,
+                  ymin = test_y_PI_l,
+                  ymax = test_y_PI_h),
+              alpha = .1) +
+  geom_jitter(aes(x=index, y=test_y_mean), alpha=0.5, width = 0.02, height = 0) + 
+  scale_x_continuous(labels = c("1" = "P:L/A:L/V:L", "2" = "P:L/A:L/V:S", "3" = "P:L/A:I/V:L", "4" = "P:L/A:I/V:S", "5" = "P:S/A:A/V:L", "6" = "P:S/A:A/V:S", "7" = "P:S/A:I/V:L", "8" = "P:S/A:I/V:I"), breaks = c(1:8)) +
+  labs(x = "pirate body size / adult pirate / victim body size ", y = "Count of success ") +
+  theme(axis.text.x = element_text(angle = 45))
+
+grid.arrange(test_result1.1_p, test_result1.1_y)
+```
+Comparing the above 2 plots, we can tell that it's more accurate when we are predicting the counts of success. The reason is that the Ns in each row of the training data are different. When we have a small N, a small change y will result in a significantly different proportion.
+
+# Question c
+```{r}
+m1.2 = "
+data{
+	int N;
+	int Y[N];
+	int n[N];
+	vector[N] P;
+	vector[N] V;
+	vector[N] A;
+}
+parameters{
+	real alpha;
+	real bP;
+	real bV;
+	real bA;
+  real bPA;
+}
+model{
+  vector[N] p;
+	alpha ~ normal(0, 10);
+	bP ~ normal(0, 5);
+	bV ~ normal(0, 5);
+	bA ~ normal(0, 5);
+  bPA ~ normal(0,5);
+
+	for (i in 1:N){
+		p[i] = inv_logit(alpha + bP * P[i] + bV * V[i] + bA * A[i] + bPA * P[i] * A[i]);
+	}
+	Y ~ binomial(n,p);
+}
+generated quantities{
+	vector[N] log_lik;
+	{
+		vector[N] p;
+		for (i in 1:N){
+			p[i] = inv_logit(alpha + bP * P[i] + bV * V[i] + bA * A[i]+ bPA * P[i] * A[i]);
+			log_lik[i] = binomial_logit_lpmf(Y[i] | n[i], p[i]);
+		}
+	}
+}"
+
+dat1.2 = dat1.1
+```
+```{r}
+fit1.2 = stan(model_code = m1.2, data = dat1.2, cores = 4)
+```
+```{r}
+post_1.2  = as.data.frame(fit1.2)
+pred_1.2 = function(P, V, A){
+  a = with(post_1.2, alpha + bP * P + bV * V + bA * A + + bPA * P * A)
+  p = inv_logit(a)
+  return(p)
+}
+
+mean1.2 = pmap(list(d$P_dummy, d$V_dummy, d$A_dummy), pred_1.2) %>%
+  purrr::map(mean) %>% 
+  unlist()
+pi1.2 = pmap(list(d$P_dummy, d$V_dummy, d$A_dummy), pred_1.2) %>%
+  purrr::map(PI) %>% 
+  unlist()
+
+test_result1.2_p = 
+  tibble(
+   actual_p = d$y / d$n,
+   test_p_PI_l = pi1.2[seq(from = 1, to = length(pi1.1), by = 2)],
+   test_p_mean = mean1.2,
+   test_p_PI_h = pi1.2[seq(from = 2, to = length(pi1.1), by = 2)],
+   index = 1:8
+         ) %>% 
+  ggplot() +
+  geom_point(aes(x=index, y=actual_p), color = 'dodgerblue') + 
+  geom_ribbon(aes(x = index,
+                  ymin = test_p_PI_l,
+                  ymax = test_p_PI_h),
+              alpha = .1) +
+  geom_jitter(aes(x=index, y=test_p_mean), alpha=0.5, width = 0.02, height = 0) + 
+  lims(y = c(0, 1)) +
+  scale_x_continuous(labels = c("1" = "P:L/A:L/V:L", "2" = "P:L/A:L/V:S", "3" = "P:L/A:I/V:L", "4" = "P:L/A:I/V:S", "5" = "P:S/A:A/V:L", "6" = "P:S/A:A/V:S", "7" = "P:S/A:I/V:L", "8" = "P:S/A:I/V:I"), breaks = c(1:8)) +
+  labs(x = "pirate body size / adult pirate / victim body size ", y = "Proportion of success") +
+  theme(axis.text.x = element_text(angle = 45))
+
+
+test_result1.2_y = 
+  tibble(
+   actual_y = d$y,
+   test_y_PI_l = pi1.2[seq(from = 1, to = length(pi1.1), by = 2)] * d$n,
+   test_y_mean = mean1.1 * d$n,
+   test_y_PI_h = pi1.2[seq(from = 2, to = length(pi1.1), by = 2)] * d$n,
+   index = 1:8
+  ) %>% 
+ggplot() +
+  geom_point(aes(x=index, y=actual_y), color = 'dodgerblue') + 
+  geom_ribbon(aes(x = index,
+                  ymin = test_y_PI_l,
+                  ymax = test_y_PI_h),
+              alpha = .1) +
+  geom_jitter(aes(x=index, y=test_y_mean), alpha=0.5, width = 0.02, height = 0) + 
+  scale_x_continuous(labels = c("1" = "P:L/A:L/V:L", "2" = "P:L/A:L/V:S", "3" = "P:L/A:I/V:L", "4" = "P:L/A:I/V:S", "5" = "P:S/A:A/V:L", "6" = "P:S/A:A/V:S", "7" = "P:S/A:I/V:L", "8" = "P:S/A:I/V:I"), breaks = c(1:8)) +
+  labs(x = "pirate body size / adult pirate / victim body size ", y = "Count of success ") +
+  theme(axis.text.x = element_text(angle = 45))
+
+grid.arrange(test_result1.2_p, test_result1.2_y)
+```
+Model Comparison
+```{r}
+# extract log likelihood from the fitted model and use WAIC.
+log_lik_1.1 = extract_log_lik(fit1.1, merge_chains = FALSE)
+log_lik_1.2 = extract_log_lik(fit1.2, merge_chains = FALSE)
+
+(waic_1.1 = waic(log_lik_1.1))
+(waic_1.2 = waic(log_lik_1.2))
+
+
+mod_comp <- loo::compare(waic_1.1, waic_1.2)
+mod_comp
+```
+From the above comparison, the 2 models have very similar waic.
