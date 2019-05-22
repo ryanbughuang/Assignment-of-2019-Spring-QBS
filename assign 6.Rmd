@@ -1,0 +1,549 @@
+---
+title: "Assign6"
+author: "Ryan Huang"
+date: "5/21/2019"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rstan)
+library(tidyverse)
+library(MASS)
+library(gridExtra)
+library(loo)
+library(rethinking)
+library(purrr)
+map = purrr::map
+select = dplyr::select
+```
+# Question 1
+Model the relationship between density and percent cover, using a log- link
+```{r}
+data(salamanders, package = 'rethinking')
+d = salamanders
+# d$PCTCOVER = d$PCTCOVER / 100
+d$PCTCOVER_log = ifelse(d$PCTCOVER==0, 0, log(d$PCTCOVER))
+```
+Stan Model
+```{r}
+m1.1='
+data {
+  int N;
+  int SALAMAN[N]; 
+  real PCTCOVER[N]; 
+}
+parameters {
+  real a;
+  real bp;
+}
+model {
+  vector[N] lambda;
+  a   ~ normal(0,100);
+  bp  ~ normal(0,10);
+
+  for(i in 1:N) lambda[i] = a + bp * (PCTCOVER[i]);
+  SALAMAN ~ poisson_log(lambda);
+}
+
+generated quantities {
+  vector[N] log_lik;
+  vector[N] lambda;
+  {
+    for(i in 1:N) {
+      lambda[i] = a + bp * (PCTCOVER[i]);
+      log_lik[i] = poisson_log_lpmf(SALAMAN[i] | lambda[i]);
+    }
+  }
+}
+'
+```
+Data
+```{r}
+dat1.1 = list(
+  N = nrow(d),
+  SALAMAN = d$SALAMAN,
+  PCTCOVER = d$PCTCOVER_log
+)
+```
+Model fitting
+```{r message=FALSE}
+fit1.1 = stan(model_code = m1.1, data = dat1.1, cores = 4)
+```
+Prediction
+```{r}
+print(fit1.1, include = F, pars = 'log_lik', probs = c(.1, .5, .9))
+post1.1 <- as.data.frame(fit1.1)
+
+for( i in (1:nrow(d))){
+  if(i == 1){
+    pred = tibble(mean = exp(post1.1[,i+49]) %>% mean,
+                  l_PI = exp(post1.1[,i+49]) %>% PI%>% .[1],
+                  h_PI = exp(post1.1[,i+49]) %>% PI%>% .[2])
+  } 
+  else{
+    pred =  tibble(mean = exp(post1.1[,i+49]) %>% mean,
+                  l_PI = exp(post1.1[,i+49]) %>% PI%>% .[1],
+                  h_PI = exp(post1.1[,i+49]) %>% PI%>% .[2]) %>% 
+            rbind(pred, .)
+  }
+}
+pred = pred %>% mutate(
+  SALAMAN = d$SALAMAN,
+  site = d$SITE,
+  PCTCOVER = d$PCTCOVER_log
+)
+
+fig1.1 = pred %>% 
+  ggplot() + 
+  geom_point(aes(x=PCTCOVER, y=SALAMAN)) + 
+  geom_ribbon(aes(x=PCTCOVER,
+                  ymin = l_PI,
+                  ymax = h_PI),
+              alpha = 0.7)
+fig1.1
+```
+From the above plot we can tell that the prediction result is poor. We can't infer the amount of salamanders by only including the percentage of PCTCOVER.
+
+# Question 2
+Improve the model by using other predictors, FORESTAGE
+
+Model 2.1: lambda = a + bp * PCTCOVER + bf * FORESTAGE (w/o interaction)
+```{r}
+m2.1='
+data {
+  int N;
+  int SALAMAN[N]; 
+  real PCTCOVER[N]; 
+  int FORESTAGE[N];
+}
+parameters {
+  real a;
+  real bp;
+  real bf;
+}
+model {
+  vector[N] lambda;
+  a   ~ normal(0,100);
+  bp  ~ normal(0,10);
+  bf  ~ normal(0,10);
+
+  for(i in 1:N) lambda[i] = a + bp * (PCTCOVER[i]) + bf * (FORESTAGE[i]);
+  SALAMAN ~ poisson_log(lambda);
+}
+
+generated quantities {
+  vector[N] log_lik;
+  vector[N] lambda;
+  {
+    for(i in 1:N) {
+      lambda[i] = a + bp * (PCTCOVER[i]) + bf * (FORESTAGE[i]);
+      log_lik[i] = poisson_log_lpmf(SALAMAN[i] | lambda[i]);
+    }
+  }
+}
+'
+```
+Model 2.2: Add category variable cover = ifelse(PCTCOVER > 70, 1, 0)
+w/ interaction between PCTCOVER and COVER
+```{r}
+m2.2='
+data {
+  int N;
+  int SALAMAN[N]; 
+  real PCTCOVER[N]; 
+  int FORESTAGE[N];
+  int COVER[N];
+}
+parameters {
+  real a;
+  real bp;
+  real bf;
+  real bc;
+  real bpc;
+}
+model {
+  vector[N] lambda;
+  a   ~ normal(0,100);
+  bp  ~ normal(0,10);
+  bf  ~ normal(0,10);
+  bc  ~ normal(0,10);
+  bpc ~ normal(0,10);
+
+  for(i in 1:N) lambda[i] = a + bp * (PCTCOVER[i]) + bf * (FORESTAGE[i]) + bc * (COVER[i]) + bpc * COVER[i] * PCTCOVER[i];
+  SALAMAN ~ poisson_log(lambda);
+}
+
+generated quantities {
+  vector[N] log_lik;
+  vector[N] lambda;
+  {
+    for(i in 1:N) {
+      lambda[i] = a + bp * (PCTCOVER[i]) + bf * (FORESTAGE[i]) + bc * (COVER[i]) + bpc * COVER[i] * PCTCOVER[i];
+      log_lik[i] = poisson_log_lpmf(SALAMAN[i] | lambda[i]);
+    }
+  }
+}
+'
+```
+Model 2.3: no age, only cover, cover rate and cover * cover rate
+```{r}
+m2.3='
+data {
+  int N;
+  int SALAMAN[N]; 
+  real PCTCOVER[N]; 
+  int COVER[N];
+}
+parameters {
+  real a;
+  real bp;
+  real bc;
+  real bpc;
+}
+model {
+  vector[N] lambda;
+  a   ~ normal(0,100);
+  bp  ~ normal(0,10);
+  bc  ~ normal(0,10);
+  bpc ~ normal(0,10);
+
+  for(i in 1:N) lambda[i] = a + bp * (PCTCOVER[i])  + bc * (COVER[i]) + bpc * COVER[i] * PCTCOVER[i];
+  SALAMAN ~ poisson_log(lambda);
+}
+
+generated quantities {
+  vector[N] log_lik;
+  vector[N] lambda;
+  {
+    for(i in 1:N) {
+      lambda[i] = a + bp * (PCTCOVER[i]) + bc * (COVER[i]) + bpc * COVER[i] * PCTCOVER[i];
+      log_lik[i] = poisson_log_lpmf(SALAMAN[i] | lambda[i]);
+    }
+  }
+}'
+```
+Model 2.5: cover, cover rate, cover * cover rate, 
+```{r}
+m2.5='
+data {
+  int N;
+  int SALAMAN[N]; 
+  real PCTCOVER[N]; 
+  int FORESTAGE[N];
+  int COVER[N];
+}
+parameters {
+  real a;
+  real bp;
+  real bf;
+  real bc;
+  real bpc;
+  real bfc;
+  real bpf;
+}
+model {
+  vector[N] lambda;
+  a   ~ normal(0,100);
+  bp  ~ normal(0,10);
+  bf  ~ normal(0,10);
+  bc  ~ normal(0,10);
+  bpc ~ normal(0,10);
+  bfc  ~ normal(0,10);
+  bpf  ~ normal(0,10);
+
+  for(i in 1:N) lambda[i] = a + bp * (PCTCOVER[i]) + bf * (FORESTAGE[i]) + bc * (COVER[i]) + bpc * COVER[i] * PCTCOVER[i] + bpf * PCTCOVER[i] * FORESTAGE[i] + bfc * FORESTAGE[i] * COVER[i];
+  SALAMAN ~ poisson_log(lambda);
+}
+
+generated quantities {
+  vector[N] log_lik;
+  vector[N] lambda;
+  {
+    for(i in 1:N) {
+      lambda[i] = a + bp * (PCTCOVER[i]) + bf * (FORESTAGE[i]) + bc * (COVER[i]) + bpc * COVER[i] * PCTCOVER[i] + bpf * PCTCOVER[i] * FORESTAGE[i] + bfc * FORESTAGE[i] * COVER[i];
+      log_lik[i] = poisson_log_lpmf(SALAMAN[i] | lambda[i]);
+    }
+  }
+}
+'
+```
+Data2.1
+```{r}
+dat2.1 = list(
+  N = nrow(d),
+  SALAMAN   = d$SALAMAN,
+  PCTCOVER  = d$PCTCOVER_log,
+  FORESTAGE = d$FORESTAGE
+)
+```
+Data2.2
+```{r}
+dat2.2 = list(
+  N = nrow(d),
+  SALAMAN   = d$SALAMAN,
+  PCTCOVER  = d$PCTCOVER_log,
+  FORESTAGE = d$FORESTAGE,
+  COVER = ifelse(d$PCTCOVER>70,1,0)
+)
+```
+Data2.3
+```{r}
+dat2.3 = list(
+  N = nrow(d),
+  SALAMAN   = d$SALAMAN,
+  PCTCOVER  = d$PCTCOVER_log,
+  COVER = ifelse(d$PCTCOVER>70,1,0)
+)
+```
+Data2.4 Don't take log on PCTCOVER
+```{r}
+dat2.4 = list(
+  N = nrow(d),
+  SALAMAN   = d$SALAMAN,
+  PCTCOVER  = d$PCTCOVER,
+  COVER = ifelse(d$PCTCOVER>70,1,0)
+)
+```
+Data2.5
+```{r}
+dat2.5 = list(
+  N = nrow(d),
+  SALAMAN   = d$SALAMAN,
+  PCTCOVER  = d$PCTCOVER_log,
+  FORESTAGE = d$FORESTAGE,
+  COVER = ifelse(d$PCTCOVER>70,1,0)
+)
+```
+
+Model fitting
+```{r message=FALSE, warning=FALSE}
+fit2.1 = stan(model_code = m2.1, data = dat2.1, cores = 4, iter = 4000)
+fit2.2 = stan(model_code = m2.2, data = dat2.2, cores = 4, iter = 4000)
+fit2.3 = stan(model_code = m2.3, data = dat2.3, cores = 4, iter = 4000)
+fit2.4 = stan(model_code = m2.3, data = dat2.4, cores = 4, iter = 4000)
+fit2.5 = stan(model_code = m2.5, data = dat2.5, cores = 4, iter = 4000)
+```
+Prediction of model 2.1
+```{r}
+print(fit2.1, include = F, pars = 'log_lik', probs = c(.1, .5, .9))
+post2.1 <- as.data.frame(fit2.1)
+
+for( i in (1:nrow(d))){
+  if(i == 1){
+    pred2 = tibble(mean = exp(post2.1[,i+50]) %>% mean,
+                  l_PI = exp(post2.1[,i+50]) %>% PI%>% .[1],
+                  h_PI = exp(post2.1[,i+50]) %>% PI%>% .[2])
+  } 
+  else{
+    pred2 =  tibble(mean = exp(post2.1[,i+50]) %>% mean,
+                  l_PI = exp(post2.1[,i+50]) %>% PI%>% .[1],
+                  h_PI = exp(post2.1[,i+50]) %>% PI%>% .[2]) %>% 
+            rbind(pred2, .)
+  }
+}
+pred2 = pred2 %>% mutate(
+  SALAMAN = d$SALAMAN,
+  PCTCOVER = d$PCTCOVER_log,
+  FORESTAGE = d$FORESTAGE
+)
+# Plot PCTCOVER
+fig2.1.1 = pred2 %>% 
+  ggplot() + 
+  geom_point(aes(x=PCTCOVER, y=SALAMAN)) + 
+  geom_ribbon(aes(x=PCTCOVER,
+                  ymin = l_PI,
+                  ymax = h_PI),
+              alpha = 0.7)
+fig2.1.1
+
+# Plot FORESTAGE
+fig2.1.2 = pred2 %>% 
+  ggplot() + 
+  geom_point(aes(x=FORESTAGE, y=SALAMAN)) + 
+  geom_ribbon(aes(x=FORESTAGE,
+                  ymin = l_PI,
+                  ymax = h_PI),
+              alpha = 0.7)
+fig2.1.2
+```
+Prediction of model 2.2
+```{r}
+print(fit2.2, include = F, pars = 'log_lik', probs = c(.1, .5, .9))
+post2.2 <- as.data.frame(fit2.2)
+colnames(post2.2)
+
+for( i in (1:nrow(d))){
+  if(i == 1){
+    pred2 = tibble(mean = exp(post2.2[,i+52]) %>% mean,
+                  l_PI = exp(post2.2[,i+52]) %>% PI%>% .[1],
+                  h_PI = exp(post2.2[,i+52]) %>% PI%>% .[2])
+  } 
+  else{
+    pred2 =  tibble(mean = exp(post2.2[,i+52]) %>% mean,
+                  l_PI = exp(post2.2[,i+52]) %>% PI%>% .[1],
+                  h_PI = exp(post2.2[,i+52]) %>% PI%>% .[2]) %>% 
+            rbind(pred2, .)
+  }
+}
+pred2 = pred2 %>% mutate(
+  SALAMAN = d$SALAMAN,
+  PCTCOVER = d$PCTCOVER_log,
+  FORESTAGE = d$FORESTAGE,
+  COVER = as.factor(ifelse(d$PCTCOVER>70,1,0))
+)
+# Plot PCTCOVER
+fig2.2.1 = pred2 %>% 
+  ggplot() + 
+  geom_point(aes(x=PCTCOVER, y=SALAMAN, color = COVER)) + 
+  geom_ribbon(aes(x=PCTCOVER,
+                  ymin = l_PI,
+                  ymax = h_PI,
+                  group = COVER,fill = COVER),
+              alpha = 0.7)
+fig2.2.1
+
+# Plot FORESTAGE
+fig2.2.2 = pred2 %>% 
+  ggplot() + 
+  geom_point(aes(x=FORESTAGE, y=SALAMAN, color = COVER)) + 
+  geom_ribbon(aes(x=FORESTAGE,
+                  ymin = l_PI,
+                  ymax = h_PI,
+                  group = COVER, fill=COVER),
+              alpha = 0.7)
+fig2.2.2
+```
+Prediction of model 2.3
+```{r}
+print(fit2.3, include = F, pars = 'log_lik', probs = c(.1, .5, .9))
+post2.3 <- as.data.frame(fit2.3)
+
+for( i in (1:nrow(d))){
+  if(i == 1){
+    pred2 = tibble(mean = exp(post2.3[,i+51]) %>% mean,
+                  l_PI = exp(post2.3[,i+51]) %>% PI%>% .[1],
+                  h_PI = exp(post2.3[,i+51]) %>% PI%>% .[2])
+  } 
+  else{
+    pred2 =  tibble(mean = exp(post2.3[,i+51]) %>% mean,
+                  l_PI = exp(post2.3[,i+51]) %>% PI%>% .[1],
+                  h_PI = exp(post2.3[,i+51]) %>% PI%>% .[2]) %>% 
+            rbind(pred2, .)
+  }
+}
+pred2 = pred2 %>% mutate(
+  SALAMAN = d$SALAMAN,
+  PCTCOVER = d$PCTCOVER_log,
+  FORESTAGE = d$FORESTAGE,
+  COVER = as.factor(ifelse(d$PCTCOVER>70,1,0))
+)
+# Plot PCTCOVER
+fig2.3.1 = pred2 %>% 
+  ggplot() + 
+  geom_point(aes(x=PCTCOVER, y=SALAMAN, color = COVER)) + 
+  geom_ribbon(aes(x=PCTCOVER,
+                  ymin = l_PI,
+                  ymax = h_PI,
+                  group = COVER,fill = COVER),
+              alpha = 0.7)
+fig2.3.1
+```
+Prediction of model 2.4
+```{r}
+print(fit2.4, include = F, pars = 'log_lik', probs = c(.1, .5, .9))
+post2.4 <- as.data.frame(fit2.4)
+
+for( i in (1:nrow(d))){
+  if(i == 1){
+    pred2 = tibble(mean = exp(post2.4[,i+51]) %>% mean,
+                  l_PI = exp(post2.4[,i+51]) %>% PI%>% .[1],
+                  h_PI = exp(post2.4[,i+51]) %>% PI%>% .[2])
+  } 
+  else{
+    pred2 =  tibble(mean = exp(post2.4[,i+51]) %>% mean,
+                  l_PI = exp(post2.4[,i+51]) %>% PI%>% .[1],
+                  h_PI = exp(post2.4[,i+51]) %>% PI%>% .[2]) %>% 
+            rbind(pred2, .)
+  }
+}
+pred2 = pred2 %>% mutate(
+  SALAMAN = d$SALAMAN,
+  PCTCOVER = d$PCTCOVER,
+  FORESTAGE = d$FORESTAGE,
+  COVER = as.factor(ifelse(d$PCTCOVER>70,1,0))
+)
+# Plot PCTCOVER
+fig2.4.1 = pred2 %>% 
+  ggplot() + 
+  geom_point(aes(x=PCTCOVER, y=SALAMAN, color = COVER)) + 
+  geom_ribbon(aes(x=PCTCOVER,
+                  ymin = l_PI,
+                  ymax = h_PI,
+                  group = COVER,fill = COVER),
+              alpha = 0.7)
+fig2.4.1
+```
+Prediction 2.5
+```{r}
+print(fit2.5, include = F, pars = 'log_lik', probs = c(.1, .5, .9))
+post2.5 <- as.data.frame(fit2.5)
+
+for( i in (1:nrow(d))){
+  if(i == 1){
+    pred2 = tibble(mean = exp(post2.5[,i+54]) %>% mean,
+                  l_PI = exp(post2.5[,i+54]) %>% PI%>% .[1],
+                  h_PI = exp(post2.5[,i+54]) %>% PI%>% .[2])
+  } 
+  else{
+    pred2 =  tibble(mean = exp(post2.5[,i+54]) %>% mean,
+                  l_PI = exp(post2.5[,i+54]) %>% PI%>% .[1],
+                  h_PI = exp(post2.5[,i+54]) %>% PI%>% .[2]) %>% 
+            rbind(pred2, .)
+  }
+}
+pred2 = pred2 %>% mutate(
+  SALAMAN = d$SALAMAN,
+  PCTCOVER = d$PCTCOVER_log,
+  FORESTAGE = d$FORESTAGE,
+  COVER = as.factor(ifelse(d$PCTCOVER>70,1,0))
+)
+# Plot PCTCOVER
+fig2.5.1 = pred2 %>% 
+  ggplot() + 
+  geom_point(aes(x=PCTCOVER, y=SALAMAN, color = COVER)) + 
+  geom_ribbon(aes(x=PCTCOVER,
+                  ymin = l_PI,
+                  ymax = h_PI,
+                  group = COVER,fill = COVER),
+              alpha = 0.7)
+fig2.5.1
+
+# Plot FORESTAGE
+fig2.5.2 = pred2 %>% 
+  ggplot() + 
+  geom_point(aes(x=FORESTAGE, y=SALAMAN, color = COVER)) + 
+  geom_ribbon(aes(x=FORESTAGE,
+                  ymin = l_PI,
+                  ymax = h_PI,
+                  group = COVER, fill=COVER),
+              alpha = 0.7)
+fig2.5.2
+```
+# Model Comparison
+```{r}
+fit_list <- list(fit1.1, fit2.1, fit2.2, fit2.3, fit2.4, fit2.5)
+# extract log likelihoods
+ll_list <- lapply(fit_list, extract_log_lik)
+# exponentiate
+exp_ll_list <- lapply(ll_list, exp)
+
+waic_list <- list() 
+for(i in 1:6) {
+waic_list[[i]] <- waic(ll_list[[i]], r_eff = rel_n_eff_list[[i]], cores = 4)
+}
+names(waic_list) <- c('fit1.1', 'fit2.1', 'fit2.2', 'fit2.3', 'fit2.4', 'fit2.5')
+loo::compare(x = waic_list)
+```
+Since model2.3 and model2.3 (include cover, cover % and interaction) are the 2 best models, we can tell that the covering percentage is more significant and we can tell that age of the forest isn't an important variable.  
+The impacts of covering percentage will be different when covering rate is above or below 70%. 
