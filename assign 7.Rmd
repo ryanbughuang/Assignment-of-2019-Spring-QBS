@@ -1,0 +1,800 @@
+---
+title: "Assign7"
+author: "Ryan Huang"
+date: "6/2/2019"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rstan)
+library(tidyverse)
+library(MASS)
+library(gridExtra)
+library(loo)
+library(rethinking)
+library(purrr)
+library(MLmetrics)
+library(BBmisc)
+library(plspm)
+map = purrr::map
+select = dplyr::select
+normalize = BBmisc::normalize
+```
+## Load Data
+```{r}
+data(Hurricanes, package = 'rethinking')
+data = Hurricanes
+data$nor_min_pressure = normalize(data$min_pressure, method='range')
+data$nor_damage_norm = normalize(data$damage_norm, method='range')
+data$nor_femininity = normalize(data$femininity, method='range')
+```
+# Question 1: Poisson model of deaths using femininity as a predictor
+Model 1.1
+```{r}
+m1.1 = "
+data {
+	int N;
+	int deaths[N];
+	real femininity[N];
+}
+
+parameters {
+	
+	real alpha;
+	real bf;
+}
+
+model {
+	real lambda[N];
+	alpha ~ normal(0, 3);
+	bf ~ normal(0, 3);
+
+	for (i in 1:N) lambda[i] = alpha + bf * femininity[i];
+	deaths ~ poisson_log(lambda);
+}
+
+generated quantities {
+	vector[N] log_lik;
+	vector[N] pred_deaths;
+	{
+		vector[N] lambda;
+		for (i in 1:N){
+			lambda[i] = alpha + bf * femininity[i];
+			log_lik[i] = poisson_log_lpmf(deaths[i] | lambda[i]);
+			pred_deaths[i] = poisson_log_rng(lambda[i]);
+		}
+	}
+}
+"
+```
+Model fitting 1.1
+```{r}
+dat1.1 = list(
+  N = nrow(data),
+  deaths = data$deaths,
+  femininity = data$femininity
+)
+fit1.1 = stan(model_code = m1.1, data = dat1.1, cores = 4)
+```
+Post Prediction 1.1
+```{r}
+post1.1 = as.data.frame(fit1.1)
+pred1.1 = post1.1 %>% select(contains('pred_deaths'))
+coef1.1 = post1.1 %>% select(alpha, bf)
+
+pred_comp1.1 = data.frame(
+  actual = data$deaths,
+  x = data$femininity,
+  pred = post1.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = mean),
+  l_PI = post1.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[1,],
+  h_PI = post1.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[2,])
+
+fig1.1 = pred_comp1.1 %>% ggplot() + 
+  geom_point(aes(x=x, y=actual), color = 'dodgerblue') + 
+  geom_line(aes(x=x, y=pred)) + 
+  geom_ribbon(aes(x=x,
+                  ymin = l_PI,
+                  ymax = h_PI), alpha=0.6)
+```
+# Question 2: Gamma-Poisson model of deaths using femininity as a predictor
+Model 2.1
+```{r}
+m2.1 = "
+data {
+	int N;
+	int deaths[N];
+	real femininity[N];
+}
+
+parameters {
+	
+	real alpha;
+	real bf;
+  real<lower=0> phi[N];
+}
+
+model {
+	real mu[N];
+	alpha ~ normal(0, 3);
+	bf ~ normal(0, 3);
+  phi ~ cauchy(0, 5);
+
+	for (i in 1:N) {
+		mu[i] = alpha + bf * femininity[i];
+	}
+	deaths ~ neg_binomial_2_log(mu, phi);
+}
+
+generated quantities {
+	vector[N] log_lik;
+	vector[N] pred_deaths;
+	{
+		real mu[N];
+		for (i in 1:N){
+			mu[i] = alpha + bf * femininity[i];
+      log_lik[i] = neg_binomial_2_log_lpmf(deaths[i] | mu[i], phi[i]);
+			pred_deaths[i] = neg_binomial_2_log_rng(mu[i], phi[i]);
+		}
+	}
+}
+"
+```
+Model fitting 2.1
+```{r}
+dat2.1 = dat1.1
+fit2.1 = stan(model_code = m2.1, data = dat2.1)
+```
+Post Predtion 2.1
+```{r}
+post2.1 = as.data.frame(fit2.1)
+pred2.1 = post2.1 %>% select(contains('pred_deaths'))
+coef2.1 = post2.1 %>% select(alpha, bf)
+
+pred_comp2.1 = data.frame(
+  actual = data$deaths,
+  x = data$femininity,
+  pred = post2.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = mean),
+  l_PI = post2.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[1,],
+  h_PI = post2.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[2,])
+
+fig2.1 = pred_comp2.1 %>% ggplot() + 
+  geom_point(aes(x=x, y=actual), color = 'dodgerblue') + 
+  geom_line(aes(x=x, y=pred)) + 
+  geom_ribbon(aes(x=x,
+                  ymin = l_PI,
+                  ymax = h_PI), alpha=0.6)
+```
+By comparing the model 1 and model 2, we can tell that the relationship between femininity and deaths is weaker in the gamma-Poisson model.
+The log-Poisson model can only deal with few variations within the data. Thus, some of the random variations are explained by femininity.
+However, the gamma-Poisson model can handle a larger proportion of unexplained variation internelly. 
+As a result, the random variations is seperated from the first model.
+```{r}
+grid.arrange(fig1.1, fig2.1, nrow=1)
+```
+# Question 3: Gamma-Poisson model of deaths using femininity, damage_norm and min_pressure as predictors.
+Model 3.1: femininity * damage_norm + femininity + damage_norm
+```{r}
+m3.1 = "
+data {
+	int N;
+	int deaths[N];
+	real femininity[N];
+	real damage_norm[N];
+}
+
+parameters {
+	
+	real alpha;
+	real bf;
+	real bd;
+	real bfd;
+  real<lower=0> phi;
+}
+
+model {
+	real mu[N];
+	alpha ~ normal(0, 1);
+	bf ~ normal(0, 1);
+	bd ~ normal(0, 1);
+	bfd ~ normal(0, 1);
+  phi ~ cauchy(0, 2);
+
+	for (i in 1:N) {
+		mu[i] = alpha + 
+				bf * femininity[i] + 
+				bd * damage_norm[i] + 
+				bfd * femininity[i] * damage_norm[i];
+		
+	}
+	deaths ~ neg_binomial_2_log(mu, phi);
+}
+
+generated quantities {
+	vector[N] log_lik;
+	vector[N] pred_deaths;
+	{
+		real mu[N];
+		for (i in 1:N){
+			mu[i] = alpha + 
+				bf * femininity[i] + 
+				bd * damage_norm[i] + 
+				bfd * femininity[i] * damage_norm[i];
+      log_lik[i] = neg_binomial_2_log_lpmf(deaths[i] | mu[i], phi);
+			pred_deaths[i] = neg_binomial_2_log_rng(mu[i], phi);
+		}
+	}
+}
+"
+```
+Model 3.2: femininity * min_pressure + femininity + min_pressure
+```{r}
+m3.2 = "
+data {
+	int N;
+	int deaths[N];
+	real femininity[N];
+	real min_pressure[N];
+}
+
+parameters {
+	real<lower=0> alpha;
+	real bf;
+	real bm;
+	real bfm;
+  real<lower=0> phi;
+}
+
+model {
+	real mu[N];
+	alpha ~ normal(0, 1);
+	bf ~ normal(0, 1);
+	bm ~ normal(0, 1);
+	bfm ~ normal(0, 1);
+  phi ~ cauchy(0, 2);
+	
+  for (i in 1:N) {
+		mu[i] = alpha + 
+				bf * femininity[i] + 
+				bm * min_pressure[i] + 
+				bfm * femininity[i] * min_pressure[i];
+  }
+
+	deaths ~ neg_binomial_2(mu, phi);
+}
+generated quantities {
+	vector[N] log_lik;
+	vector[N] pred_deaths;
+	{
+		real mu[N];
+		for (i in 1:N){
+			mu[i] = alpha + 
+				bf * femininity[i] + 
+				bm * min_pressure[i] + 
+				bfm * femininity[i] * min_pressure[i];
+      log_lik[i] = neg_binomial_2_lpmf(deaths[i] | mu[i], phi);
+			pred_deaths[i] = neg_binomial_2_rng(mu[i], phi);
+		}
+	}
+}
+"
+
+```
+Model 3.3: femininity * min_pressure * damage_norm + femininity * damage_norm + femininity * min_pressure + femininity + damage_norm + min_pressure
+```{r}
+m3.3 = "
+data {
+	int N;
+	int deaths[N];
+	real femininity[N];
+	real damage_norm[N];
+	real min_pressure[N];
+}
+
+parameters {
+	
+	real<lower = 0> alpha;
+	real bf;
+	real bd;
+	real bm;
+	real bfd;
+	real bfm;
+	real bfdm;
+  real<lower = 0> phi;
+}
+
+model {
+	real mu[N];
+	alpha ~ normal(3, 1);
+	bf ~ normal(0, 1);
+	bd ~ normal(0, 1);
+	bm ~ normal(0, 1);
+	bfd ~ normal(0, 1);
+	bfm ~ normal(0, 1);
+	bfdm ~ normal(0, 1);
+	phi ~ cauchy(0.5, 3);
+
+
+	for (i in 1:N) {
+		mu[i] = alpha + 
+				bf * femininity[i] + 
+				bd * damage_norm[i] + 
+				bm * min_pressure[i] + 
+				bfd * femininity[i] * damage_norm[i] + 
+				bfm * femininity[i] * min_pressure[i] + 
+				bfdm * femininity[i] * damage_norm[i] * min_pressure[i];
+		
+	}
+	deaths ~ neg_binomial_2(mu, phi);
+}
+
+generated quantities {
+	vector[N] log_lik;
+	vector[N] pred_deaths;
+	{
+		real mu[N];
+		for (i in 1:N){
+			mu[i] = alpha + 
+				bf * femininity[i] + 
+				bd * damage_norm[i] + 
+				bm * min_pressure[i] + 
+				bfd * femininity[i] * damage_norm[i] + 
+				bfm * femininity[i] * min_pressure[i] + 
+				bfdm * femininity[i] * damage_norm[i] * min_pressure[i];
+  		log_lik[i] = neg_binomial_2_lpmf(deaths[i] | mu[i], phi);
+			pred_deaths[i] = neg_binomial_2_rng(mu[i], phi);
+		}
+	}
+}
+"
+```
+Model fitting 3.1/3.2/3.3
+```{r}
+dat3.1 = list(
+  N = nrow(data),
+  deaths = data$deaths,
+  femininity = data$nor_femininity,
+  damage_norm = data$nor_damage_norm
+)
+dat3.2 = list(
+  N = nrow(data),
+  deaths = data$deaths,
+  femininity = data$nor_femininity,
+  min_pressure = data$nor_min_pressure
+)
+dat3.3 = list(
+  N = nrow(data),
+  deaths = data$deaths,
+  femininity = data$nor_femininity,
+  damage_norm = data$nor_damage_norm,
+  min_pressure = data$nor_min_pressure
+)
+
+
+fit3.1 = stan(model_code = m3.1, data = dat3.1, control = list(max_treedepth = 15, adapt_delta = 0.99), chains = 2, iter = 4000, warmup = 1500)
+fit3.2 = stan(model_code = m3.2, data = dat3.2, control = list(max_treedepth = 15, adapt_delta = 0.99), chains = 2, iter = 4000, warmup = 1500)
+fit3.3 = stan(model_code = m3.3, data = dat3.3, control = list(max_treedepth = 15, adapt_delta = 0.99), chains = 2, iter = 4000, warmup = 1500)
+```
+Plotting the predictions of the 3 models
+```{r}
+# pred 3.1
+post3.1 = as.data.frame(fit3.1)
+pred3.1 = post3.1 %>% select(contains('pred_deaths'))
+pred_comp3.1 = data.frame(
+  actual = data$deaths,
+  x = data$femininity,
+  pred = post3.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = mean),
+  l_PI = post3.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[1,],
+  h_PI = post3.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[2,])
+
+fig3.1 = pred_comp3.1 %>% ggplot() + 
+  geom_point(aes(x=x, y=actual), color = 'dodgerblue') + 
+  geom_point(aes(x=x, y=pred))
+
+# pred 3.2
+post3.2 = as.data.frame(fit3.2)
+pred3.2 = post3.2 %>% select(contains('pred_deaths'))
+pred_comp3.2 = data.frame(
+  actual = data$deaths,
+  x = data$femininity,
+  pred = post3.2 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = mean),
+  l_PI = post3.2 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[1,],
+  h_PI = post3.2 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[2,])
+
+fig3.2 = pred_comp3.2 %>% ggplot() + 
+  geom_point(aes(x=x, y=actual), color = 'dodgerblue') + 
+  geom_point(aes(x=x, y=pred)) + 
+  geom_ribbon(aes(x=x,
+                  ymin = l_PI,
+                  ymax = h_PI), alpha=0.6)
+
+# pred 3.3
+post3.3 = as.data.frame(fit3.3)
+pred3.3 = post3.3 %>% select(contains('pred_deaths'))
+
+
+pred_comp3.3 = data.frame(
+  actual = data$deaths,
+  x = data$femininity,
+  pred = post3.3 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = mean),
+  l_PI = post3.3 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[1,],
+  h_PI = post3.3 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[2,])
+
+fig3.3 = pred_comp3.3 %>% ggplot() + 
+  geom_point(aes(x=x, y=actual), color = 'dodgerblue') + 
+  geom_line(aes(x=x, y=pred)) + 
+  geom_ribbon(aes(x=x,
+                  ymin = l_PI,
+                  ymax = h_PI), alpha=0.6)
+
+grid.arrange(fig3.1, fig3.2, fig3.3, nrow=1)
+```
+
+Model Comparison: fit1.1, fit2.1, fit3.1, fit3.2, fit3.3 
+```{r}
+fit_list <- list(fit1.1, fit2.1, fit3.1, fit3.2, fit3.3)
+# extract log likelihoods
+ll_list <- lapply(fit_list, extract_log_lik)
+# exponentiate
+exp_ll_list <- lapply(ll_list, exp)
+
+waic_list <- list() 
+for(i in 1:5) {
+waic_list[[i]] <- waic(ll_list[[i]], r_eff = rel_n_eff_list[[i]], cores = 4)
+}
+names(waic_list) <- c('fit1.1', 'fit2.1', 'fit3.1', 'fit3.2', 'fit3.3')
+loo::compare(x = waic_list)
+```
+# Question 4: Using the logarithm of damage_norm as a predictor
+```{r}
+m4.1 = "
+data {
+	int N;
+	int deaths[N];
+	real femininity[N];
+	real damage_norm[N];
+}
+
+parameters {
+	
+	real alpha;
+	real bf;
+	real bd;
+	real bfd;
+  real<lower=0> phi;
+}
+
+model {
+	real mu[N];
+	alpha ~ normal(0, .5);
+	bf ~ normal(0, .5);
+	bd ~ normal(0, .5);
+	bfd ~ normal(0, .5);
+  phi ~ cauchy(0, 2);
+
+	for (i in 1:N) {
+		mu[i] = alpha + 
+				bf * femininity[i] + 
+				bd * damage_norm[i] + 
+				bfd * femininity[i] * damage_norm[i];
+		
+	}
+	deaths ~ neg_binomial_2_log(mu, phi);
+}
+
+generated quantities {
+	vector[N] log_lik;
+	vector[N] pred_deaths;
+	{
+		real mu[N];
+		for (i in 1:N){
+			mu[i] = alpha + 
+				bf * femininity[i] + 
+				bd * damage_norm[i] + 
+				bfd * femininity[i] * damage_norm[i];
+      log_lik[i] = neg_binomial_2_log_lpmf(deaths[i] | mu[i], phi);
+			pred_deaths[i] = neg_binomial_2_log_rng(mu[i], phi);
+		}
+	}
+}
+"
+dat4.1 = list(
+  N = nrow(data),
+  deaths = data$deaths,
+  femininity = data$nor_femininity,
+  damage_norm = normalize(log(data$damage_norm), method = 'range')
+)
+fit4.1 = stan(model_code = m3.1, data = dat4.1, control = list(max_treedepth = 15, adapt_delta = 0.99), chains = 2, iter = 4000, warmup = 1500)
+```
+Compare predictions-damage_norm from fit3.1 and fit 4.1
+```{r}
+# pred 3.1
+post3.1 = as.data.frame(fit3.1)
+pred3.1 = post3.1 %>% select(contains('pred_deaths'))
+pred_comp3.1 = data.frame(
+  actual = data$deaths,
+  x = data$damage_norm,
+  pred = post3.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = mean),
+  l_PI = post3.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[1,],
+  h_PI = post3.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[2,])
+
+fig3.1 = pred_comp3.1 %>% ggplot() + 
+  geom_point(aes(x=x, y=actual), color = 'dodgerblue') + 
+  geom_line(aes(x=x, y=pred)) + 
+  geom_ribbon(aes(x=x,
+                  ymin = l_PI,
+                  ymax = pmin(h_PI, 300)), alpha=0.6) +
+  ylim(-10,300)
+
+# pred 4.1
+post4.1 = as.data.frame(fit4.1)
+pred4.1 = post4.1 %>% select(contains('pred_deaths'))
+pred_comp4.1 = data.frame(
+  actual = data$deaths,
+  x = data$damage_norm,
+  pred = post4.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = mean),
+  l_PI = post4.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[1,],
+  h_PI = post4.1 %>% 
+    select(contains('pred_deaths')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[2,])
+
+fig4.1 = pred_comp4.1 %>% ggplot() + 
+  geom_point(aes(x=x, y=actual), color = 'dodgerblue') + 
+  geom_line(aes(x=x, y=pred)) + 
+  geom_ribbon(aes(x=x,
+                  ymin = l_PI,
+                  ymax = h_PI), alpha=0.6)
+
+grid.arrange(fig3.1, fig4.1)
+```
+Model Comparison: fit1.1, fit3.1, fit4.1
+```{r}
+fit_list <- list(fit1.1,fit3.1, fit4.1)
+# extract log likelihoods
+ll_list <- lapply(fit_list, extract_log_lik)
+# exponentiate
+exp_ll_list <- lapply(ll_list, exp)
+
+waic_list <- list() 
+for(i in 1:3) {
+waic_list[[i]] <- waic(ll_list[[i]], r_eff = rel_n_eff_list[[i]], cores = 4)
+}
+names(waic_list) <- c('fit1.1','fit3.1','fit4.1')
+loo::compare(x=waic_list)
+```
+From both the prediction comparison and WAIC comparison, we can tell that log(damage_norm) can better predict the deaths compared with damage_norm.
+
+# Question 5
+```{r}
+data(bangladesh, package='rethinking')
+data2 = bangladesh
+data2$district_id = as.integer(as.factor(data2$district))
+
+d2 = data2 %>% 
+  select(use.contraception,district_id) %>% 
+  group_by(district_id) %>% 
+  summarise(size = length(use.contraception),
+            prop = mean(use.contraception))
+d2$count = d2$size * d2$prop
+x = get_dummy(d2$district_id)
+```
+Model 5.1
+```{r}
+m5.1 = "
+data {
+	int N;
+	int total[N];
+  int count[N];
+	vector[N-1] x[N];
+}
+
+parameters {
+	real alpha;
+	row_vector[N-1] beta;
+}
+
+model {
+  // prior
+  alpha ~ normal(0.5,3); // average use rate = 0.4, logit=2/3
+  for (i in 1:N-1){
+    beta[i] ~ normal(0,1);
+  }
+	
+
+  for (n in 1:N){
+ 	 count[n] ~ binomial_logit(total[n], alpha + beta * x[n]);
+	}	
+}
+
+generated quantities {
+  vector[N] prediction;
+  vector[N] log_lik;
+  {
+    vector[N] p;
+    for (i in 1:N){
+      p[i] = inv_logit(alpha + beta * x[i]);
+      prediction[i] = binomial_rng(total[i], p[i]);
+      log_lik[i] = binomial_logit_lpmf(count[i] | total[i], alpha + beta * x[i]);
+    }
+  }
+}
+"
+```
+Model fitting 5.1
+```{r}
+dat5.1 = list(
+  N = nrow(d2),
+  total = d2$size,
+  count = as.integer(d2$count),
+  x = x[,-60]
+)
+#m5.1v = stan_model(model_code = m5.1)
+fit5.1 = stan(model_code = m5.1, data = dat5.1)
+```
+
+Model 5.2
+```{r}
+m5.2 = "
+data {
+	int N;
+	int total[N];
+  int count[N];
+}
+
+parameters {
+	real alpha_bar;
+	real r_effect[N];
+	real<lower=0> sigma_r;
+}
+
+model {
+  
+  	// prior
+	alpha_bar ~ normal(0.5, 1.5); // average use rate = 0.4, logit=2/3
+	sigma_r ~ exponential(1);
+
+  	for (j in 1:N){
+  		r_effect[j] ~ normal(0,1);
+  	}
+  
+	
+  	for (n in 1:N){
+ 		 count[n] ~ binomial_logit(total[n], alpha_bar + r_effect[n] * sigma_r);
+	}	
+}
+
+generated quantities {
+  	vector[N] prediction;
+  	vector[N] log_lik;
+  {
+    vector[N] p;
+    for (i in 1:N){
+      p[i] = inv_logit(alpha_bar + r_effect[i] * sigma_r);
+      prediction[i] = binomial_rng(total[i], p[i]);
+      log_lik[i] = binomial_lpmf(count[i] | total[i], p[i]);
+    }
+  }
+}
+"
+```
+Model fitting 5.2
+```{r}
+dat5.2 = list(
+  N = nrow(d2),
+  total = d2$size,
+  count = as.integer(d2$count)
+)
+fit5.2 = stan(model_code = m5.2, data = dat5.2)
+```
+
+Prediction Comparison: fit5.1, fit5.2
+The plots show that both of the 2 models can  perform great prediction.
+```{r}
+post5.1 = as.data.frame(fit5.1)
+post5.2 = as.data.frame(fit5.2)
+
+# Model 5.1
+pred_comp5.1 = data.frame(
+  actual = d2$count,
+  district = d2$district_id,
+  pred =  post5.1 %>% 
+    select(contains('prediction')) %>% 
+    apply(MARGIN = 2, FUN = mean),
+  l_PI = post5.1 %>% 
+    select(contains('prediction')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[1,],
+  h_PI = post5.1 %>% 
+    select(contains('prediction')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[2,])
+
+fig5.1 = pred_comp5.1 %>% ggplot() + 
+  geom_point(aes(x=district, y=actual), color = 'dodgerblue') + 
+  geom_point(aes(x=district, y=pred), alpha=0.6) + 
+  geom_ribbon(aes(x=district,
+                  ymin = l_PI,
+                  ymax = h_PI), alpha=0.3) +
+  ggtitle('Model 5.1')
+
+# Model 5.2
+pred_comp5.2 = data.frame(
+  actual = d2$count,
+  district = d2$district_id,
+  pred =  post5.2 %>% 
+    select(contains('prediction')) %>% 
+    apply(MARGIN = 2, FUN = mean),
+  l_PI = post5.2 %>% 
+    select(contains('prediction')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[1,],
+  h_PI = post5.2 %>% 
+    select(contains('prediction')) %>% 
+    apply(MARGIN = 2, FUN = PI) %>% .[2,])
+
+fig5.2 = pred_comp5.2 %>% ggplot() + 
+  geom_point(aes(x=district, y=actual), color = 'dodgerblue') + 
+  geom_point(aes(x=district, y=pred),alpha=0.6) + 
+  geom_ribbon(aes(x=district,
+                  ymin = l_PI,
+                  ymax = h_PI), alpha=0.3) +
+  ggtitle('Model 5.2')
+
+grid.arrange(fig5.1, fig5.2)
+```
+WAIC/LOO Comparison: The 2 scores show conflicting results. WAIC suggests model 5.1(fixed effect model) is slightly better while LOO prefers model 5.2 (random effect model).
+```{r}
+fit_list <- list(fit5.1,fit5.2)
+# extract log likelihoods
+ll_list <- lapply(fit_list, extract_log_lik)
+# exponentiate
+exp_ll_list <- lapply(ll_list, exp)
+
+waic_list <- list() 
+loo_list <- list() 
+for(i in 1:2) {
+waic_list[[i]] <- waic(ll_list[[i]], cores = 4)
+loo_list[[i]] <- loo(ll_list[[i]], cores = 4)
+}
+names(waic_list) <- c('fit5.1','fit5.2')
+loo::compare(x=waic_list)
+loo::compare(x=loo_list)
+```
+
