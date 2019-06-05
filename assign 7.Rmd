@@ -117,7 +117,7 @@ parameters {
 	
 	real alpha;
 	real bf;
-  real<lower=0> phi[N];
+  real<lower=0> phi;
 }
 
 model {
@@ -127,7 +127,7 @@ model {
   phi ~ cauchy(0, 5);
 
 	for (i in 1:N) {
-		mu[i] = alpha + bf * femininity[i];
+		mu[i] = alpha + bf*femininity[i];
 	}
 	deaths ~ neg_binomial_2_log(mu, phi);
 }
@@ -139,8 +139,8 @@ generated quantities {
 		real mu[N];
 		for (i in 1:N){
 			mu[i] = alpha + bf * femininity[i];
-      log_lik[i] = neg_binomial_2_log_lpmf(deaths[i] | mu[i], phi[i]);
-			pred_deaths[i] = neg_binomial_2_log_rng(mu[i], phi[i]);
+      log_lik[i] = neg_binomial_2_log_lpmf(deaths[i] | mu[i], phi);
+			pred_deaths[i] = neg_binomial_2_log_rng(mu[i], phi);
 		}
 	}
 }
@@ -149,7 +149,7 @@ generated quantities {
 Model fitting 2.1
 ```{r}
 dat2.1 = dat1.1
-fit2.1 = stan(model_code = m2.1, data = dat2.1)
+fit2.1 = stan(model_code = m2.1, data = dat2.1, chains = 2)
 ```
 Post Predtion 2.1
 ```{r}
@@ -796,5 +796,46 @@ loo_list[[i]] <- loo(ll_list[[i]], cores = 4)
 names(waic_list) <- c('fit5.1','fit5.2')
 loo::compare(x=waic_list)
 loo::compare(x=loo_list)
+```
+# Do the models disagree?
+From the plot, the predictions from the 2 plots are very close.
+
+The district with largest p_difference is district 11, the reason is that the predictions are very small.
+
+The district with largest difference is district 60, but the p_diff is not significant.
+
+Generally speaking, model 2(random effect model) has a narrower pretiction range, since the intercepts are drawn from the same distribution.
+
+Model 1 (fixed effect model) on the other hand has a wider range since the intercepts are drawn independtly.
+```{r}
+q5_pred_comp = data.frame(
+  actual = d2$count,
+  district = d2$district_id,
+  pred_5_1 =  post5.1 %>% 
+    select(contains('prediction')) %>% 
+    apply(MARGIN = 2, FUN = mean),
+  pred_5_2 =  post5.2 %>% 
+    select(contains('prediction')) %>% 
+    apply(MARGIN = 2, FUN = mean)
+  )
+
+# Percentage difference 
+q5_pred_comp$p_dif = abs(q5_pred_comp$pred_5_1 - q5_pred_comp$pred_5_2) / q5_pred_comp$pred_5_1
+# Absolute difference
+q5_pred_comp$dif = abs(q5_pred_comp$pred_5_1 - q5_pred_comp$pred_5_2)
+
+fig5.3 = q5_pred_comp %>% ggplot() + 
+  geom_point(aes(x=district, y = pred_5_1), color="dodgerblue") + 
+  geom_point(aes(x=district, y = pred_5_2), alpha = 0.7) + 
+  geom_line(aes(x=district, y = actual))
+  ylab("Prediction")
+fig5.3
+
+fig5.4 = q5_pred_comp %>% ggplot() + 
+  geom_point(aes(x=district, y = p_dif))
+fig5.4
+
+q5_pred_comp %>% filter(p_dif == max(q5_pred_comp$p_dif))
+q5_pred_comp %>% filter(dif == max(q5_pred_comp$dif))
 ```
 
