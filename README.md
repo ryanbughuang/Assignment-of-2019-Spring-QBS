@@ -1,5 +1,6 @@
 # Assignment-of-2019-Spring-QBS
 Assignments of NTU 2019 Spring QBS by Dr. Sunny Yang
+Textbook: Statistical Rethinking by Richard Mcelreath
 
 107-2 楊曙榮教授，多變量分析課程作業
 
