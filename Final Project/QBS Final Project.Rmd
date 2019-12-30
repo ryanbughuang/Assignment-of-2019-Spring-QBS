@@ -3,8 +3,12 @@ title: "YouBike Demand Forecasting"
 author: "Ryan Huang"
 date: "5/20/2019"
 output:
-  word_document: default
-  html_document: default
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 4
+    number_sections: true
+    toc_float: true
 ---
 
 ```{r setup, include=FALSE}
