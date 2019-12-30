@@ -1,0 +1,923 @@
+---
+title: "YouBike Demand Forecasting"
+author: "Ryan Huang"
+date: "5/20/2019"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rstan)
+library(tidyverse)
+library(MASS)
+library(gridExtra)
+library(loo)
+library(rethinking)
+library(purrr)
+library(lubridate)
+library(MLmetrics)
+library(timeDate)
+library(forcats)
+library(cowplot)
+map = purrr::map
+select = dplyr::select
+MODE = function(n)as.numeric(names(table(n)))[which.max(table(n))]
+```
+#Import Data
+```{r}
+options(stringsAsFactors = FALSE)
+file_path = "time_filtered_data.csv"
+data = read.csv(file_path)
+```
+#EDA
+## Freq: Find the 3 most used stations
+```{r}
+# Rent station
+a = data %>% group_by(rent_sta) %>% count() %>% ungroup() 
+a = a[order(a$n, decreasing = TRUE),]
+fig1 = ggplot(data, aes(fct_infreq(rent_sta))) + 
+  geom_bar() + 
+  xlab("Station") +
+  ylab("Use freq") +
+  ggtitle("Rent Freq. by Station") + 
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+# Return station
+b = data %>% group_by(return_sta) %>% count() %>% ungroup() 
+b = b[order(b$n, decreasing = TRUE),]
+fig2 = ggplot(data, aes(fct_infreq(return_sta))) + 
+  geom_bar() + 
+  xlab("Station") +
+  ylab("Use freq") +
+  ggtitle("Return Freq. by Station") + 
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+
+
+# ref: https://cran.r-project.org/web/packages/egg/vignettes/Ecosystem.html
+grid.arrange(fig1, 
+             tableGrob(a[1:5,1],theme = ttheme_default(base_size = 8)),
+             fig2, 
+             tableGrob(b[1:5,1],theme = ttheme_default(base_size = 8))
+             )
+```
+Import processed data
+```{r}
+options(stringsAsFactors = FALSE)
+file_path = "NTU Information Bldg..csv"
+data = read.csv(file_path)
+```
+
+## Hoouly comparison(by station)
+```{r}
+data$day = data$index %>% substring(1, 10) %>% as.factor()
+data$hour = data$index %>% substring(12,16)
+data$DoW = weekdays(as.Date(data$day))
+data$weekday = ifelse(isWeekday(as.Date(data$day)),1,0) %>% as.integer
+data %>% ggplot() +
+  geom_line(aes(x=hour, y = quantity, group = day, color = as.factor(weekday))) + 
+  theme(axis.text.x = element_text(angle = 45)) + 
+  theme(
+    panel.background = element_rect(fill = "transparent") # bg of the panel
+    , plot.background = element_rect(fill = "transparent", color = NA) # bg of the plot
+    , panel.grid.major = element_blank() # get rid of major grid
+    #, panel.grid.minor = element_blank() # get rid of minor grid
+    #, legend.background = element_rect(fill = "transparent") # get rid of legend bg
+    , legend.box.background = element_rect(fill = "transparent") # get rid of legend panel bg
+  )
+
+data %>% ggplot() +
+  geom_line(aes(x=hour, y = quantity, group = day, color = day)) + 
+  theme(axis.text.x = element_text(angle = 45)) + 
+  theme(
+    panel.background = element_rect(fill = "transparent") # bg of the panel
+    , plot.background = element_rect(fill = "transparent", color = NA) # bg of the plot
+    , panel.grid.major = element_blank() # get rid of major grid
+    #, panel.grid.minor = element_blank() # get rid of minor grid
+    #, legend.background = element_rect(fill = "transparent") # get rid of legend bg
+    , legend.box.background = element_rect(fill = "transparent") # get rid of legend panel bg
+  )
+```
+##Weekly comparison(by station)
+```{r}
+data$WofM = c(rep(0,2*24), rep(1,7*24), rep(2,7*24), rep(3,7*24),rep(4,7*24),rep(5,1))
+wk1 = data %>% filter(WofM==1)
+wk2 = data %>% filter(WofM==2)
+wk3 = data %>% filter(WofM==3)
+wk4 = data %>% filter(WofM==4)
+ggplot() +
+    geom_line(aes(x=seq(1:168), y = wk1$quantity,color = 'wk1')) + 
+    geom_line(aes(x=seq(1:168), y = wk2$quantity,color = "wk2")) +
+    geom_line(aes(x=seq(1:168), y = wk3$quantity,color = "wk3")) +
+    geom_line(aes(x=seq(1:168), y = wk4$quantity,color = "wk4")) +
+    scale_color_manual(values = c(
+    'wk1' = 'dodgerblue',
+    'wk2' = 'blue',
+    'wk3' = 'darkblue',
+    'wk4' = 'black')) +
+    labs(color = 'Weekly Demand')+
+    ylab("Demand") +
+    xlab("MRT Taipei City Hall Stataion")
+      
+```
+
+Train, Test split
+```{r}
+# train data: 2016/01/01 - 2016/01/23
+train = data[1:(24*23),]
+
+# test data: 2016/01/24 - 2016/01/30
+test = data[(24*23+1):721,]
+```
+# HMM Models
+##Model_1: HMM w/o weekday
+```{r}
+hmm_model = "
+functions {
+  vector normalize(vector x) {
+    return x / sum(x);
+  }
+}
+data {
+  int<lower=1> T; // 期數
+  int<lower=1> K; // state數
+  int y[T];       // observation
+}
+
+parameters {
+  // Discrete state model
+  simplex[K] pi1;  // initial state prob 
+  simplex[K] A[K]; // transition matrix
+  // Poisson observation model
+  ordered[K] lambdas;
+}
+
+transformed parameters {
+  vector[K] logalpha[T];
+  { // Forward algorithm log p(z_t = j | y_{1:t})
+    real accumulator[K];
+    logalpha[1] = log(pi1) + poisson_lpmf(y[1] | lambdas);
+    for (t in 2:T) {
+      for (j in 1:K) { // j = current (t)
+      for (i in 1:K) { // i = previous (t-1)
+      // Murphy (2012) p. 609 eq. 17.48
+      // belief state      + transition prob + local evidence at t
+      accumulator[i] = logalpha[t-1, i] + log(A[i, j]) + poisson_lpmf(y[t] | lambdas[j]);
+      }
+      logalpha[t, j] = log_sum_exp(accumulator);
+      }
+    }
+  } // Forward
+}
+
+model {
+  target += log_sum_exp(logalpha[T]); // Note: update based only on last logalpha
+}
+
+generated quantities {
+  vector[K] alpha[T];
+  
+  vector[K] logbeta[T];
+  vector[K] loggamma[T];
+  
+  vector[K] beta[T];
+  vector[K] gamma[T];
+  
+  int<lower=1, upper=K> zstar[T];
+  real logp_zstar;
+  
+  { // Forward algortihm
+    for (t in 1:T)
+      alpha[t] = softmax(logalpha[t]);
+  } // Forward
+  
+  { // Backward algorithm log p(y_{t+1:T} | z_t = j)
+    real accumulator[K];
+    
+    for (j in 1:K)
+      logbeta[T, j] = 1;
+    
+    for (tforward in 0:(T-2)) {
+      int t;
+      t = T - tforward;
+      
+      for (j in 1:K) {    // j = previous (t-1)
+      for (i in 1:K) {  // i = next (t)
+      // Murphy (2012) Eq. 17.58
+      // backwards t    + transition prob + local evidence at t
+      accumulator[i] = logbeta[t, i] + log(A[j, i]) + poisson_lpmf(y[t] | lambdas[i]);
+      }
+      logbeta[t-1, j] = log_sum_exp(accumulator);
+      }
+    }
+    
+    for (t in 1:T)
+      beta[t] = softmax(logbeta[t]);
+  } // Backward
+  
+  { // forward-backward algorithm log p(z_t = j | y_{1:T})
+    for(t in 1:T) {
+      loggamma[t] = alpha[t] .* beta[t];
+    }
+    
+    for(t in 1:T)
+      gamma[t] = normalize(loggamma[t]);
+  } // forward-backward
+  
+  
+  
+  { // Viterbi algorithm
+    int bpointer[T, K]; // backpointer to the most likely previous state on the most probable path
+    real delta[T, K];   // max prob for the sequence up to t
+    // that ends with an emission from state k
+    
+    for (j in 1:K)
+      delta[1, K] = poisson_lpmf(y[1] | lambdas[j]);
+    
+    for (t in 2:T) {
+      for (j in 1:K) { // j = current (t)
+      delta[t, j] = negative_infinity();
+      for (i in 1:K) { // i = previous (t-1)
+      real logp;
+      logp = delta[t-1, i] + log(A[i, j]) + poisson_lpmf(y[t] | lambdas[j]);
+      if (logp > delta[t, j]) {
+        bpointer[t, j] = i;
+        delta[t, j] = logp;
+      }
+      }
+      }
+    }
+    
+    logp_zstar = max(delta[T]);
+    
+    for (j in 1:K)
+      if (delta[T, j] == logp_zstar)
+        zstar[T] = j;
+    
+    for (t in 1:(T - 1)) {
+      zstar[T - t] = bpointer[T - t + 1, zstar[T - t + 1]];
+    }
+  }
+}"
+#stan_model(model_code = hmm_model)
+```
+##Model_2: HMM with regression on lambda (weekday)
+```{r}
+hmm_model_2 = "
+functions {
+  vector normalize(vector x) {
+    return x / sum(x);
+  }
+}
+data {
+  int<lower=1> T; // 期數
+  int<lower=1> K; // state數
+  int y[T];       // observation
+  int w[T];       // weekday
+  //vector<lower=0>[K] alpha;  // transit prior
+}
+
+parameters {
+  // Discrete state model
+  simplex[K] pi1;  // initial state prob 
+  simplex[K] A[K]; // transition matrix
+  // Poisson observation model
+  // Assumed lambda = a + bp
+  // vector[K] lambda;
+  vector<lower=0,upper=70>[K] a;
+  vector<lower=0,upper=10>[K] bp;
+}
+
+transformed parameters {
+  vector[K] logalpha[T];
+  
+  { // Forward algorithm log p(z_t = j | y_{1:t})
+    real accumulator[K];
+    logalpha[1] = log(pi1) + poisson_lpmf(y[1] | a + bp*w[1]);
+    for (t in 2:T) {
+      for (j in 1:K) { // j = current (t)
+      for (i in 1:K) { // i = previous (t-1)
+      // Murphy (2012) p. 609 eq. 17.48
+      // belief state      + transition prob + local evidence at t
+      accumulator[i] = logalpha[t-1, i] + log(A[i, j]) + poisson_lpmf(y[t] | a[j] + bp[j] * w[t]);
+      }
+      logalpha[t, j] = log_sum_exp(accumulator);
+      }
+    }
+  } // Forward
+}
+
+model {
+  //a ~ lognormal(mu, sigma)
+  a[1] ~ lognormal(3,1);
+  a[2] ~ lognormal(2,1);
+  a[3] ~ lognormal(1,1);
+  
+  //b ~ normal(mu, sigma)
+  bp[1] ~ lognormal(1,1);
+  bp[2] ~ lognormal(1,1);
+  bp[3] ~ lognormal(1,1);
+  
+  for (k in 1:K)
+    A[k] ~ dirichlet(rep_vector(1, K));
+  
+  target += log_sum_exp(logalpha[T]); // Note: update based only on last logalpha
+}
+
+generated quantities {
+  vector[K] alpha[T];
+  
+  vector[K] logbeta[T];
+  vector[K] loggamma[T];
+  
+  vector[K] beta[T];
+  vector[K] gamma[T];
+  
+  int<lower=1, upper=K> zstar[T];
+  real logp_zstar;
+  
+  { // Forward algortihm
+    for (t in 1:T)
+      alpha[t] = softmax(logalpha[t]);
+  } // Forward
+  
+  { // Backward algorithm log p(y_{t+1:T} | z_t = j)
+    real accumulator[K];
+    
+    for (j in 1:K)
+      logbeta[T, j] = 1;
+    
+    for (tforward in 0:(T-2)) {
+      int t;
+      t = T - tforward;
+      
+      for (j in 1:K) {    // j = previous (t-1)
+      for (i in 1:K) {  // i = next (t)
+      // Murphy (2012) Eq. 17.58
+      // backwards t    + transition prob + local evidence at t
+      accumulator[i] = logbeta[t, i] + log(A[j, i]) + poisson_lpmf(y[t] | a[i] + bp[i] * w[t]);
+      }
+      logbeta[t-1, j] = log_sum_exp(accumulator);
+      }
+    }
+    
+    for (t in 1:T)
+      beta[t] = softmax(logbeta[t]);
+  } // Backward
+  
+  { // forward-backward algorithm log p(z_t = j | y_{1:T})
+    for(t in 1:T) {
+      loggamma[t] = alpha[t] .* beta[t];
+    }
+    
+    for(t in 1:T)
+      gamma[t] = normalize(loggamma[t]);
+  } // forward-backward
+  
+  
+  
+  { // Viterbi algorithm
+    int bpointer[T, K]; // backpointer to the most likely previous state on the most probable path
+    real delta[T, K];   // max prob for the sequence up to t
+    // that ends with an emission from state k
+    
+    for (j in 1:K)
+      delta[1, K] = poisson_lpmf(y[1] | a[j] + bp[j] * w[1]);
+    
+    for (t in 2:T) {
+      for (j in 1:K) { // j = current (t)
+      delta[t, j] = negative_infinity();
+      for (i in 1:K) { // i = previous (t-1)
+      real logp;
+      logp = delta[t-1, i] + log(A[i, j]) + poisson_lpmf(y[t] | a[j] + bp[j] * w[t]);
+      if (logp > delta[t, j]) {
+        bpointer[t, j] = i;
+        delta[t, j] = logp;
+      }
+      }
+      }
+    }
+    
+    logp_zstar = max(delta[T]);
+    
+    for (j in 1:K)
+      if (delta[T, j] == logp_zstar)
+        zstar[T] = j;
+    
+    for (t in 1:(T - 1)) {
+      zstar[T - t] = bpointer[T - t + 1, zstar[T - t + 1]];
+    }
+  }
+}"
+#stan_model(model_code = hmm_model_2)
+```
+# Method 1: Naive prediction
+## Model 1 
+Model 1 fitting
+```{r}
+hmm_init <- function(K, y) { # K: number of stages, y: y_train
+  clasif <- kmeans(y, K)
+  init.mu <- by(y, clasif$cluster, mean) 
+  init.sigma <- by(y, clasif$cluster, sd) 
+  init.order <- order(init.mu)
+  list(
+    mu = init.mu[init.order], sigma = init.sigma[init.order]
+  ) }
+
+hmm_VI_fit = function(K,y){ # K: number of stages, y: y_train
+  rstan_options(auto_write = TRUE) 
+  options(mc.cores = parallel::detectCores())
+  
+  stan.model = stan_model(model_code = hmm_model)
+  stan.data = list(
+    T = length(y), 
+    K = K,
+    y=y)
+  vb(stan.model,
+     data = stan.data,
+     iter = 20000,
+     init = function(){hmm_init(K,y)}
+  )
+}
+```
+Model 1 back_testing
+```{r}
+fit1.1 = hmm_VI_fit(3, data$quantity)
+post1.1 = as.data.frame(fit1.1)
+post1.1 = post1.1 %>% select(-contains("log")) %>% select(-contains("alpha")) %>% select(-contains("beta")) %>% select(-contains("gamma"))
+
+post_pred = data_frame(index = seq(1:721))
+for(i in 1:nrow(post1.1)){
+  lambda_lst = post1.1[i,13:15] %>% t() %>% as.vector()
+  z_lst = post1.1[i,17:ncol(post1.1)-1] %>% t() %>% as.vector()
+  mylist = c()
+  for(j in 1:length(z_lst)){
+    mylist = append(mylist,rpois(1,lambda_lst[z_lst[j]]))
+  }
+  post_pred = post_pred %>% cbind(.,mylist)
+}
+
+post_pred = post_pred[,2:ncol(post_pred)]
+
+a = post_pred %>% apply(1,PI)
+
+data$pred = post_pred %>% apply(1,mean)
+data$l_PI = a[1,]
+data$h_PI = a[2,]
+
+
+fig1.1 = data %>% 
+  ggplot() + 
+  geom_point(aes(x=seq(1:721), y=quantity),color = 'dodgerblue') + 
+  geom_ribbon(aes(x=seq(1:721),
+                  ymin = l_PI,
+                  ymax = h_PI),
+              alpha = 0.7) + 
+  geom_line(aes(x=seq(1:721), y=pred))+
+  ggtitle("Model1 backtest")
+```
+Method 1: Prediction using transition matrix and state at last period of training data
+```{r}
+fit1.2 = hmm_VI_fit(3, train$quantity)
+post1.2 = as.data.frame(fit1.2)
+post1.2 = post1.2 %>% select(-contains("log")) %>% select(-contains("alpha")) %>% select(-contains("beta")) %>% select(-contains("gamma"))
+
+# prediction
+hmm_predict_1 = function(data, T, K){
+  # parameters
+  A = matrix(data[4:(3+K^2)], nrow = K)
+  lambda = as_vector(data[13:15])
+  Z = unlist(data[567])
+  
+  # hidden path
+  z = vector("numeric", T+1)
+  z[1] = Z
+  for (t in 2:(T+1)){
+    z[t] = sample(1:K, size = 1, prob = A[z[t - 1], ])
+  }
+  
+  # prediction
+  y = vector("numeric", T)
+  for (t in 1:T){
+    y[t] = rpois(1, lambda[z[t+1]])
+  }
+  list(y = y, z = z[2:length(z)])
+}
+
+pred_1 =  post1.2 %>%
+    apply(., MARGIN=1, FUN=hmm_predict_1, T=169, K=3) %>%
+    lapply(., function (x) x[c('y')]) %>% 
+    unlist() %>% 
+    matrix(., nrow = 169) %>%
+    apply(., MARGIN = 1, mean)
+PI_1 =  post1.2 %>%
+    apply(., MARGIN=1, FUN=hmm_predict_1, T=169, K=3) %>%
+    lapply(., function (x) x[c('y')]) %>% 
+    unlist() %>% 
+    matrix(., nrow = 169) %>%
+    apply(., MARGIN = 1, PI)
+
+test$pred = pred_1
+test$l_PI = PI_1[1,]
+test$h_PI = PI_1[2,]
+fig1.2 = test %>% ggplot() + 
+  geom_ribbon(aes(x=seq(553,721),
+                  ymin=l_PI,
+                  ymax=h_PI),alpha=0.7)+
+  geom_point(aes(x=seq(553,721), y=quantity),color = 'dodgerblue') +
+  geom_line(aes(x=seq(553,721),y=pred)) +
+  ggtitle("Model1 + Method1")
+  
+
+```
+
+## Model 2 Back_testing and Naive prediction
+Model 2 fitting
+```{r}
+hmm_VI_fit_2 = function(K,y,w){ # K: number of stages, y: y_train
+  rstan_options(auto_write = TRUE) 
+  options(mc.cores = parallel::detectCores())
+  
+  stan.model = stan_model(model_code = hmm_model_2)
+  stan.data = list(
+    T = length(y), 
+    K = K,
+    y=y,
+    w=w)
+  vb(stan.model,
+     data = stan.data,
+     iter = 20000,
+     init = function(){hmm_init(K,y)}
+  )
+}
+```
+Model 2 back_testing
+```{r}
+fit_2 = hmm_VI_fit_2(3, data$quantity, as.integer(data$weekday))
+post_2 = as.data.frame(fit_2)
+post_2 = post_2 %>% select(-contains("log")) %>% select(-contains("alpha")) %>% select(-contains("beta")) %>% select(-contains("gamma"))
+
+post_2_pred = data_frame(index = seq(1:721),
+                         weekday = as.integer(data$weekday))
+for(i in 1:nrow(post_2)){
+  z_lst = post_2[i,] %>% 
+    select(contains("zstar")) %>% 
+    t() %>% as.vector()
+  mylist = c()
+  for(j in 1:length(z_lst)){
+    lambda_lst = post_2[j,13:15] + post_2[j,16:18] * post_2_pred[[j,2]] %>% t() %>% as.vector()
+    mylist = append(mylist,rpois(1,lambda_lst[[z_lst[j]]]))
+  }
+  post_2_pred = post_2_pred %>% cbind(.,mylist)
+}
+
+post_2_pred = post_2_pred[,3:ncol(post_2_pred)]
+a = post_2_pred %>% apply(1,PI)
+data$pred_2 = post_2_pred %>% apply(1,mean)
+data$l_PI_2 = a[1,]
+data$h_PI_2 = a[2,]
+
+
+fig2.1 = data %>% 
+  ggplot() + 
+  geom_ribbon(aes(x=seq(1:721),
+                  ymin = l_PI_2,
+                  ymax = h_PI_2),
+              alpha = 0.7) + 
+  geom_point(aes(x=seq(1:721), y=quantity),color = 'dodgerblue') +
+  geom_line(aes(x=seq(1:721), y=pred_2))+
+  ggtitle("Model2 Backtest")
+```
+Method 1: Prediction using transition matrix and state at last period of training data
+```{r}
+fit2.2 = hmm_VI_fit_2(3, train$quantity, train$weekday)
+post2.2 = as.data.frame(fit2.2)
+post2.2 = post2.2 %>% select(-contains("log")) %>% select(-contains("alpha")) %>% select(-contains("beta")) %>% select(-contains("gamma"))
+colnames(post2.2)
+# prediction
+hmm_predict_2 = function(data, T, K, weekday_lst){
+  # parameters
+  A = matrix(data[4:(3+K^2)], nrow = K)
+  Z = data[570] %>% unlist()
+  a = data[13:15] %>% unlist()
+  bp = data[16:18] %>% unlist()
+  # hidden path
+  z = vector("numeric", T+1)
+  z[1] = Z
+  for (t in 2:(T+1)){
+    z[t] = sample(1:K, size = 1, prob = A[z[t - 1], ])
+  }
+  y = vector("numeric", T)
+  for (t in 1:T){
+    y[t] = rpois(1, lambda = a[z[t+1]] + bp[z[t+1]]*weekday_lst[t])
+  }
+  list(y = y, z = z[2:length(z)])
+}
+
+pred_2 = post2.2 %>%
+    apply(., MARGIN=1, FUN=hmm_predict_2, T=169, K=3, test$weekday) %>%
+    lapply(., function (x) x[c('y')]) %>% 
+    unlist() %>% 
+    matrix(., nrow = 169) %>%
+    apply(., MARGIN = 1, mean)
+
+PI_2 = post2.2 %>%
+    apply(., MARGIN=1, FUN=hmm_predict_2, T=169, K=3, test$weekday) %>%
+    lapply(., function (x) x[c('y')]) %>% 
+    unlist() %>% 
+    matrix(, nrow = 169) %>%
+    apply(., MARGIN = 1, PI)
+
+test$pred_2 = pred_2
+test$l_PI_2 = PI_2[1,]
+test$h_PI_2 = PI_2[2,]
+
+fig2.2 = test %>% ggplot() + 
+   geom_ribbon(aes(x=seq(553,721),
+                  ymin = l_PI_2,
+                  ymax = h_PI_2),alpha=0.7) +
+  geom_point(aes(x=seq(553,721), y=quantity),color = 'dodgerblue') +
+  geom_line(aes(x=seq(553,721),y=pred_2))+
+  ggtitle("Model2 + Method1")
+```
+
+## Back_testing Comparison
+The results show that both 2 models are able to capture the historical states.
+```{r}
+# RMSE comparison
+cat("The RMSE of model_1 is ", RMSE(data$pred, data$quantity))
+cat("The RMSE of model_2 is ", RMSE(data$pred_2, data$quantity))
+
+fit_logalpha = as.data.frame(fit1.1) %>% select(contains('logalpha'))
+fit_logalpha = fit_logalpha %>%
+  select(`logalpha[721,1]`,`logalpha[721,2]`,`logalpha[721,3]`)
+
+fit_2_logalpha = as.data.frame(fit_2) %>% select(contains('logalpha'))
+fit_2_logalpha = fit_2_logalpha %>%
+  select(`logalpha[721,1]`,`logalpha[721,2]`,`logalpha[721,3]`)
+
+log_list <- list(fit_logalpha, fit_2_logalpha)
+test <- lapply(log_list, as.matrix)
+waic_list <- list()
+loo_list <- list()
+for(i in 1:2) {
+waic_list[[i]] <- waic(test[[i]], r_eff = rel_n_eff_list[[i]], cores = 4)
+loo_list[[i]] <- loo(test[[i]], cores = 4)
+}
+
+names(waic_list) <- c('fit1', 'fit2')
+print(waic_list)
+print(loo_list)
+```
+
+## Train/Test Comparison
+We can tell that both the 2 models have very poor prediction on t+1~t+169 since the predicted state is locked at t.
+```{r}
+# graph comparison
+grid.arrange(fig1.1, fig1.2, fig2.1, fig2.2, nrow = 2)
+```
+
+# Revised Prediction Method
+**Assumption: Same day of the week should be in similar state**
+Predict the state based on trained state
+```{r}
+# Extract most likely path from posterior
+zlst1.2 = post1.2 %>% select(contains('zstar')) %>% apply(FUN=MODE, MARGIN = 2) %>% unlist()
+zlst2.2 = post2.2 %>% select(contains('zstar')) %>% apply(FUN=MODE, MARGIN = 2) %>% unlist()
+train$z_1 = zlst1.2
+train$z_2 = zlst2.2
+train$hourly = rep(seq(1:24),23) - 1
+train$date = train$index %>% str_sub(1,11)
+train$dayofweek = as.POSIXlt(train$index)$wday + 1
+```
+
+## Method 2: Predict the state in each hour of Monday ~ Sunday using MODE of past 3 weeks
+```{r}
+pred_1_z = c()
+for (i in seq(1:7)){
+  temp = train %>% 
+    filter(dayofweek == i) %>% 
+    select(z_1,hourly,date) %>% 
+    spread(, key=date, value=z_1) %>% 
+    apply(MARGIN = 1, FUN = MODE)
+  if (i == 1) pred_1_z = temp
+  else pred_1_z = append(pred_1_z,temp)
+}
+
+pred_2_z = c()
+for (i in seq(1:7)){
+  temp = train %>% 
+    filter(dayofweek == i) %>% 
+    select(z_2,hourly,date) %>% 
+    spread(, key=date, value=z_2) %>% 
+    apply(MARGIN = 1, FUN = MODE)
+  if (i == 1) pred_2_z = temp
+  else pred_2_z = append(pred_2_z,temp)
+}
+
+test_2 = data[(24*23+1):720,]
+test_2$pred_1_z = pred_1_z
+test_2$pred_2_z = pred_2_z
+```
+
+Make prediction based on predicted states (MODE)
+```{r}
+pred_1.2 = function(z){
+  a = rpois(1000, post1.2[,12+z])
+  return(a)
+}
+
+test_2$pred_1_mean = test_2$pred_1_z %>%
+  mapply(FUN=pred_1.2) %>% 
+  apply(FUN=mean,MARGIN = 2) 
+
+test_2$pred_1_lPI = test_2$pred_1_z %>%
+  mapply(FUN=pred_1.2) %>% 
+  apply(FUN=PI,MARGIN = 2) %>% .[1,]
+
+test_2$pred_1_hPI = test_2$pred_1_z %>%
+  mapply(FUN=pred_1.2) %>% 
+  apply(FUN=PI,MARGIN = 2) %>% .[2,]
+
+
+pred_2.2 = function(z,w){
+  a = rpois(1000, post2.2[,12+z]+post2.2[,15+z]*w)
+  return(a)
+}
+
+for (i in c(1:nrow(test_2))){
+  test_2$pred_2_mean[i] = 
+    pred_2.2(test_2$pred_2_z[i], test_2$weekday[i]) %>% mean
+  test_2$pred_2_hPI[i] = 
+    pred_2.2(test_2$pred_2_z[i], test_2$weekday[i]) %>% 
+    PI %>% .[2]
+  test_2$pred_2_lPI[i] = 
+    pred_2.2(test_2$pred_2_z[i], test_2$weekday[i]) %>% 
+    PI %>% .[1]
+}
+```
+
+Plot the prediction result
+```{r}
+test_2$x_axis = seq(1:nrow(test_2))
+fig1.3 = test_2 %>% ggplot() +
+  geom_point(aes(x=x_axis, y=quantity), color = 'dodgerblue') + 
+  geom_line(aes(x=x_axis, y=pred_1_mean)) + 
+  geom_ribbon(aes(x=x_axis,
+                  ymin = pred_1_lPI,
+                  ymax = pred_1_hPI),
+              alpha = 0.7) +
+  ggtitle("Model1 + Method2")
+
+fig2.3 = test_2 %>% ggplot() +
+  geom_point(aes(x=x_axis, y=quantity), color = 'dodgerblue') + 
+  geom_line(aes(x=x_axis, y=pred_2_mean)) + 
+  geom_ribbon(aes(x=x_axis,
+                  ymin = pred_2_lPI,
+                  ymax = pred_2_hPI),
+              alpha = 0.7) +
+  ggtitle("Model2 + Method2")
+grid.arrange(fig1.2, fig1.3, fig2.2, fig2.3, nrow=2)
+cat("The RMSE of model_1 + method_2 is", RMSE(test_2$pred_1_mean, test_2$quantity),"\n")
+cat("The RMSE of model_2 + method_2 is", RMSE(test_2$pred_2_mean, test_2$quantity))
+```
+
+
+## Method 3: Use all the states of the past 3 weeks
+```{r}
+train2 = train[(24*2+1):(24*23),] # only use full weeks from 1/3 ~ 1/23
+for (i in (1:7)){
+  temp = train2 %>% 
+    filter(dayofweek == i) %>% 
+    select(z_1,hourly,date) %>% 
+    spread(, key=date, value=z_1) %>% 
+    select(-hourly)
+  names(temp)<-c("w1","w2","w3")
+  if (i == 1) pred_3_z = temp
+  else pred_3_z = rbind(pred_3_z,temp)
+}
+
+for (i in seq(1:7)){
+  temp = train2 %>% 
+    filter(dayofweek == i) %>% 
+    select(z_2,hourly,date) %>% 
+    spread(, key=date, value=z_2) %>% 
+    select(-hourly)
+  names(temp)<-c("w1","w2","w3")
+  if (i == 1) pred_4_z = temp
+  else pred_4_z = rbind(pred_4_z,temp)
+}
+```
+Prediction using past 3 weeks and take average
+```{r}
+pred_3_z
+for (i in 1:nrow(pred_3_z)){
+  pred_3_z$pred_mean[i] = 1/3 * mean(
+    pred_1.2(pred_3_z$w1[i])+
+    pred_1.2(pred_3_z$w2[i])+
+    pred_1.2(pred_3_z$w3[i]))
+  
+  pred_3_z$pred_lPI[i] = 1/3 * PI(
+    pred_1.2(pred_3_z$w1[i])+
+    pred_1.2(pred_3_z$w2[i])+
+    pred_1.2(pred_3_z$w3[i]))[1]
+  
+  pred_3_z$pred_hPI[i] = 
+    1/3 * PI(
+    pred_1.2(pred_3_z$w1[i])+
+    pred_1.2(pred_3_z$w2[i])+
+    pred_1.2(pred_3_z$w3[i]))[2]
+} 
+
+pred_4_z$weekday = test_2$weekday
+for (i in c(1:nrow(pred_4_z))){
+  pred_4_z$pred_mean[i] = 
+    1/3 * mean(
+    pred_2.2(pred_4_z$w1[i], pred_4_z$weekday[i])+
+    pred_2.2(pred_4_z$w2[i], pred_4_z$weekday[i])+
+    pred_2.2(pred_4_z$w3[i], pred_4_z$weekday[i]))
+  
+  pred_4_z$pred_lPI[i] = 
+    1/3 * PI(
+    pred_2.2(pred_4_z$w1[i], pred_4_z$weekday[i])+
+    pred_2.2(pred_4_z$w2[i], pred_4_z$weekday[i])+
+    pred_2.2(pred_4_z$w3[i], pred_4_z$weekday[i]))[1]
+  
+  pred_4_z$pred_hPI[i] = 
+    1/3 * PI(
+    pred_2.2(pred_4_z$w1[i], pred_4_z$weekday[i])+
+    pred_2.2(pred_4_z$w2[i], pred_4_z$weekday[i])+
+    pred_2.2(pred_4_z$w3[i], pred_4_z$weekday[i]))[2]
+}
+
+```
+
+Method 3 Prediction Comparison 
+```{r}
+# RMSE Comparison
+pred_3_z$quantity = test_2$quantity
+pred_4_z$quantity = test_2$quantity
+RMSE(pred_3_z$pred_mean, pred_3_z$quantity)
+RMSE(pred_4_z$pred_mean, pred_4_z$quantity)
+
+# Graphical Comparison
+pred_3_z$x_axis = seq(1:168)
+pred_4_z$x_axis = seq(1:168)
+
+fig1.4 = pred_3_z %>% ggplot() +
+  geom_point(aes(x=x_axis, y=quantity), color = 'dodgerblue') + 
+  geom_line(aes(x=x_axis, y=pred_mean)) + 
+  geom_ribbon(aes(x=x_axis,
+                  ymin = pred_lPI,
+                  ymax = pred_hPI),
+              alpha = 0.7)+
+  ggtitle("Model1 + Method3")
+
+fig2.4 = pred_4_z %>% ggplot() +
+  geom_point(aes(x=x_axis, y=quantity), color = 'dodgerblue') + 
+  geom_line(aes(x=x_axis, y=pred_mean)) + 
+  geom_ribbon(aes(x=x_axis,
+                  ymin = pred_lPI,
+                  ymax = pred_hPI),
+              alpha = 0.7) +
+  ggtitle("Model2 + Method3")
+
+```
+
+# Compare all 3 methods 
+```{r}
+grid.arrange(fig1.2, fig2.2, fig1.3, fig2.3, fig1.4, fig2.4, nrow=3)
+cat("The RMSE of model_1 + method_2 is", 
+    RMSE(test_2$pred_1_mean, test_2$quantity),"\n")
+cat("The RMSE of model_2 + method_2 is", 
+    RMSE(test_2$pred_2_mean, test_2$quantity),"\n")
+cat("The RMSE of model_1 + method_3 is", 
+    RMSE(pred_3_z$pred_mean, pred_3_z$quantity),"\n")
+cat("The RMSE of model_2 + method_3 is", 
+    RMSE(pred_4_z$pred_mean, pred_4_z$quantity))
+```
+
+# Reference
+ref_1: https://discourse.mc-stan.org/t/fitting-a-hidden-markov-model-with-hierarchical-emission-parameters/1404/3  
+
+ref_2: https://mc-stan.org/docs/2_18/stan-users-guide/hmms-section.html
+
+ref_3: https://zenodo.org/record/1284341/files/main_pdf.pdf?download=1
+
+
+```{r}
+fig2.4 + 
+  theme(
+    panel.background = element_rect(fill = "transparent") # bg of the panel
+    , plot.background = element_rect(fill = "transparent", color = NA) # bg of the plot
+    , panel.grid.major = element_blank() # get rid of major grid
+    #, panel.grid.minor = element_blank() # get rid of minor grid
+    #, legend.background = element_rect(fill = "transparent") # get rid of legend bg
+    , legend.box.background = element_rect(fill = "transparent") # get rid of legend panel bg
+  )
+```
+
+
+
