@@ -1,5 +1,5 @@
-# 2019-Spring-QBS
-Assignments of NTU 2019 Spring QBS by Dr. Sunny Yang
+# Multivariate Analysis
+NTU 2019 Spring Multivariate Analysis (QBS) by Dr. Sunny Yang
 
 107-2 楊曙榮教授，多變量分析課程作業
 
@@ -12,6 +12,8 @@ https://github.com/stan-dev), a probabilistic programming language for statistic
   5. model comparison
 
 Textbook: [Statistical Rethinking by Richard Mcelreath](https://xcelab.net/rm/publications/)
+
+## Assignment
 
 Assign1: grid approximation
 
@@ -27,7 +29,10 @@ Assign6: Poisson GLM
 
 Assign7: over-dispersion, gamma-Poisson GLM, multilevel model, varying effect model
 
-Final project: YouBike Demand Forecasting using Hidden Markov Model with Poisson GLM
+## Project
+Project: YouBike Demand Forecasting using Hidden Markov Model with Poisson GLM
+
+>Given Taipei YouBike renting data of January 2016. Please explore these data, combining what you have learned in class, college, and graduate school, to find out business insight.
 
 
 
